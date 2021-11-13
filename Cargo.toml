@@ -13,6 +13,7 @@ tree-sitter = "0.20.0"
 serde = "1.0.130"
 toml = "0.5.8"
 lazy_static = "1.4.0"
+itertools = "0.10.1"
 
 [build-dependencies]
 cc="*"

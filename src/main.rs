@@ -9,7 +9,7 @@ use crate::editor::TextEditor;
 use crate::theme::Theme;
 use druid::widget::{Flex, Label, Padding, Painter};
 use druid::*;
-use std::ops::Sub;
+use std::ops::{Deref, Sub};
 
 const WINDOW_TITLE: LocalizedString<AppState> = LocalizedString::new("Hello World!");
 
@@ -22,7 +22,7 @@ struct AppState {
 }
 
 lazy_static::lazy_static! {
-    pub static ref THEME: Theme = toml::from_str(include_str!("../runtime/themes/onedark.toml")).unwrap();
+    pub static ref THEME: Theme = toml::from_str(include_str!("../runtime/themes/dark_plus.toml")).unwrap();
 }
 
 fn main() {

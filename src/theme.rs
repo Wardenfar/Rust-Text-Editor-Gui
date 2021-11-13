@@ -1,4 +1,5 @@
 use druid::Color;
+use itertools::Itertools;
 use serde::{Deserialize, Deserializer};
 use std::collections::HashMap;
 use toml::Value;
@@ -106,11 +107,15 @@ impl<'de> Deserialize<'de> for Theme {
 }
 
 impl Theme {
-    pub fn scope(&self, scope: &str) -> Style {
-        self.styles
-            .get(scope)
-            .map(|s| s.clone())
-            .unwrap_or(Style::error())
+    pub fn scope(&self, query: &str) -> Style {
+        let parts = query.split('.').collect::<Vec<_>>();
+        for i in (1..=parts.len()).rev() {
+            let scope: String = parts[0..i].iter().join(".");
+            if let Some(style) = self.styles.get(&scope) {
+                return style.clone();
+            }
+        }
+        Style::default()
     }
 
     #[inline]

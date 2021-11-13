@@ -50,6 +50,10 @@ impl Widget<AppState> for TextEditor {
         match event {
             Event::KeyDown(key) => {
                 let dirty = match &key.code {
+                    Code::Escape => {
+                        println!("{:?}", self.buffer.text());
+                        false
+                    }
                     Code::ArrowDown => self.buffer.move_cursor(Movement::Down),
                     Code::ArrowLeft => self.buffer.move_cursor(Movement::Left),
                     Code::ArrowRight => self.buffer.move_cursor(Movement::Right),
@@ -58,12 +62,17 @@ impl Widget<AppState> for TextEditor {
                     Code::Delete => self.buffer.do_action(Action::Delete),
                     Code::Enter => self.buffer.do_action(Action::Insert("\n".into())),
                     _ => {
-                        let char = char::from_u32(key.key.legacy_charcode());
-                        if let Some(char) = char {
-                            self.buffer.do_action(Action::Insert(String::from(char)));
-                            true
-                        } else {
+                        let code = key.key.legacy_charcode();
+                        if code == 0 {
                             false
+                        } else {
+                            let char = char::from_u32(code);
+                            if let Some(char) = char {
+                                self.buffer.do_action(Action::Insert(String::from(char)));
+                                true
+                            } else {
+                                false
+                            }
                         }
                     }
                 };

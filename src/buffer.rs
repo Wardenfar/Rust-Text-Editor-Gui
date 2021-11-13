@@ -1,6 +1,6 @@
 use ropey::Rope;
 use std::cell::Cell;
-use std::cmp::min;
+use std::cmp::{max, min};
 use std::io::Read;
 
 pub struct Buffer {
@@ -43,7 +43,7 @@ impl Buffer {
             self.rope.line_to_char(line + 1)
         };
 
-        if end > start + 1 {
+        if end != self.rope.len_chars() {
             end -= 1
         }
 
@@ -110,7 +110,31 @@ impl Buffer {
         false
     }
 
-    pub fn remove_chars(&mut self, start: usize, end: usize) {
+    pub fn remove_chars(&mut self, mut start: usize, mut end: usize) {
+        if start > self.rope.len_chars() {
+            start = self.rope.len_chars()
+        }
+        if end > self.rope.len_chars() {
+            end = self.rope.len_chars()
+        }
+
+        if start == end {
+            return;
+        }
+
+        // delete crlf in one block
+        let start_line = self.rope.char_to_line(start);
+        let start_bounds = self.line_bounds(start_line);
+        if start > start_bounds.1 {
+            start = start_bounds.1;
+        }
+
+        let end_line = self.rope.char_to_line(end);
+        let end_bounds = self.line_bounds(end_line);
+        if end > end_bounds.1 {
+            end = self.line_bounds(end_line.saturating_add(1)).0;
+        }
+
         let curr = self.cursor();
         if curr >= end {
             self.cursor.set(curr - (end - start))
@@ -167,6 +191,14 @@ mod tests {
         assert_eq!(buf.text(), "tst");
         buf.insert(3, "\nnew line");
         assert_eq!(2, buf.rope().len_lines())
+    }
+
+    #[test]
+    fn bounds_3() {
+        let input = "{\na}";
+        let mut buf = Buffer::from_reader(Cursor::new(input));
+        assert_eq!(buf.line_bounds(0), (0, 1));
+        assert_eq!(buf.line_bounds(1), (2, 4));
     }
 
     #[test]
