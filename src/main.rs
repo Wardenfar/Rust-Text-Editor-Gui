@@ -1,5 +1,6 @@
 mod buffer;
 mod editor;
+mod highlight;
 
 #[macro_use]
 extern crate druid;

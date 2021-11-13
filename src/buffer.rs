@@ -82,8 +82,22 @@ impl Buffer {
                     next_line.0 + min(next_line.1 - next_line.0, cur - curr_line.0)
                 }
             }
-            Movement::Left => cur.saturating_sub(1),
-            Movement::Right => cur.saturating_add(1),
+            Movement::Left => {
+                let next = cur.saturating_sub(1);
+                if next < curr_line.0 {
+                    prev_line.1
+                } else {
+                    next
+                }
+            }
+            Movement::Right => {
+                let next = cur.saturating_add(1);
+                if next > curr_line.1 {
+                    next_line.0
+                } else {
+                    next
+                }
+            }
         };
 
         self.cursor.set(min(new, max));
