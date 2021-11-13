@@ -54,7 +54,6 @@ impl Highlight for TreeSitterHighlight {
         for m in matches {
             let name = kind[m.pattern_index].as_str();
 
-            println!("{}", kind[m.pattern_index]);
             for cap in m.captures {
                 let start = cap.node.range().start_byte;
                 let end = cap.node.range().end_byte;
@@ -78,8 +77,6 @@ impl Highlight for TreeSitterHighlight {
             })
             .map(|r| r.clone())
             .collect::<Vec<_>>();
-
-        println!("{:?}", regions);
 
         regions
     }

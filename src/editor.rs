@@ -11,7 +11,7 @@ use druid::{
 };
 use ropey::RopeSlice;
 
-use crate::buffer::{Buffer, Movement};
+use crate::buffer::{Action, Buffer, Movement};
 use crate::highlight::{Highlight, Region, TreeSitterHighlight};
 use crate::{AppState, FontWeight, EDITOR_FONT, THEME};
 
@@ -19,19 +19,29 @@ pub struct TextEditor {
     buffer: Buffer,
     layouts: Vec<D2DTextLayout>,
     regions: Vec<Region>,
+    highlight: TreeSitterHighlight,
 }
 
 impl TextEditor {
     pub fn new() -> Self {
         let buffer = Buffer::from_reader(Cursor::new(include_str!("../file.json")));
 
-        let mut highlight = TreeSitterHighlight::new();
-        let regions = highlight.parse(buffer.rope().slice(..).as_str().unwrap().as_bytes());
-        Self {
+        let highlight = TreeSitterHighlight::new();
+        let mut editor = Self {
             buffer,
             layouts: vec![],
-            regions,
-        }
+            regions: vec![],
+            highlight,
+        };
+        editor.calculate_highlight();
+        editor
+    }
+
+    pub fn calculate_highlight(&mut self) {
+        let regions = self
+            .highlight
+            .parse(self.buffer.rope().slice(..).as_str().unwrap().as_bytes());
+        self.regions = regions;
     }
 }
 
@@ -39,12 +49,26 @@ impl Widget<AppState> for TextEditor {
     fn event(&mut self, ctx: &mut EventCtx, event: &Event, _data: &mut AppState, _env: &Env) {
         match event {
             Event::KeyDown(key) => {
-                match key.code {
+                let dirty = match &key.code {
                     Code::ArrowDown => self.buffer.move_cursor(Movement::Down),
                     Code::ArrowLeft => self.buffer.move_cursor(Movement::Left),
                     Code::ArrowRight => self.buffer.move_cursor(Movement::Right),
                     Code::ArrowUp => self.buffer.move_cursor(Movement::Up),
-                    _ => {}
+                    Code::Backspace => self.buffer.do_action(Action::Backspace),
+                    Code::Delete => self.buffer.do_action(Action::Delete),
+                    Code::Enter => self.buffer.do_action(Action::Insert("\n".into())),
+                    _ => {
+                        let char = char::from_u32(key.key.legacy_charcode());
+                        if let Some(char) = char {
+                            self.buffer.do_action(Action::Insert(String::from(char)));
+                            true
+                        } else {
+                            false
+                        }
+                    }
+                };
+                if dirty {
+                    self.calculate_highlight();
                 }
                 ctx.request_paint()
             }
@@ -125,19 +149,14 @@ impl Widget<AppState> for TextEditor {
 
             let layout = builder.build().unwrap();
 
+            let char_width = (layout.size().width + layout.trailing_whitespace_width())
+                / (bounds.1 - bounds.0) as f64
+                / 2.0;
+
             ctx.draw_text(&layout, Point::new(0.0, y));
 
-            if bounds.0 <= cursor && cursor < bounds.1 {
-                let pos = layout.hit_test_text_position(cursor - bounds.0);
-                let x = pos.point.x;
-                let line = Line::new(
-                    Point::new(x, y),
-                    Point::new(x, y + layout.size().height + 4.0),
-                );
-                ctx.stroke(line, &Color::RED, 1.0);
-            }
-            if cursor == bounds.1 {
-                let x = layout.size().width;
+            if bounds.0 <= cursor && cursor <= bounds.1 {
+                let x = char_width * (cursor - bounds.0) as f64;
                 let line = Line::new(
                     Point::new(x, y),
                     Point::new(x, y + layout.size().height + 4.0),

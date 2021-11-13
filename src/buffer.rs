@@ -24,6 +24,12 @@ pub enum Movement {
     Right,
 }
 
+pub enum Action {
+    Insert(String),
+    Backspace,
+    Delete,
+}
+
 impl Buffer {
     pub fn line_bounds(&self, line: usize) -> (usize, usize) {
         let start = if line > self.rope.len_lines() {
@@ -64,7 +70,7 @@ impl Buffer {
         self.rope.char_to_line(self.cursor.get())
     }
 
-    pub fn move_cursor(&self, m: Movement) {
+    pub fn move_cursor(&self, m: Movement) -> bool {
         let cur = self.cursor.get();
         let line = self.current_line();
 
@@ -101,10 +107,49 @@ impl Buffer {
         };
 
         self.cursor.set(min(new, max));
+        false
+    }
+
+    pub fn remove_chars(&mut self, start: usize, end: usize) {
+        let curr = self.cursor();
+        if curr >= end {
+            self.cursor.set(curr - (end - start))
+        } else if curr >= start {
+            self.cursor.set(start)
+        }
+        self.rope.remove(start..end)
+    }
+
+    pub fn insert(&mut self, start: usize, chars: &str) {
+        let curr = self.cursor();
+        if curr >= start {
+            self.cursor.set(curr + chars.chars().count())
+        }
+        self.rope.insert(start, chars);
+    }
+
+    pub fn do_action(&mut self, a: Action) -> bool {
+        let curr = self.cursor();
+        match a {
+            Action::Insert(chars) => {
+                self.insert(curr, chars.as_str());
+            }
+            Action::Backspace => {
+                self.remove_chars(curr.saturating_sub(1), curr);
+            }
+            Action::Delete => {
+                self.remove_chars(curr, curr.saturating_add(1));
+            }
+        }
+        true
     }
 
     pub fn cursor(&self) -> usize {
         self.cursor.get()
+    }
+
+    pub fn text(&self) -> &str {
+        self.rope.slice(..).as_str().unwrap()
     }
 }
 
@@ -112,6 +157,17 @@ impl Buffer {
 mod tests {
     use crate::buffer::{Buffer, Movement};
     use std::io::Cursor;
+
+    #[test]
+    fn edit() {
+        let mut buf = Buffer::from_reader(Cursor::new("test"));
+        buf.insert(1, "yay");
+        assert_eq!(buf.text(), "tyayest");
+        buf.remove_chars(1, 5);
+        assert_eq!(buf.text(), "tst");
+        buf.insert(3, "\nnew line");
+        assert_eq!(2, buf.rope().len_lines())
+    }
 
     #[test]
     fn bounds() {
