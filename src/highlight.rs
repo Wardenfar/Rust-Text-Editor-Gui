@@ -1,4 +1,6 @@
-use tree_sitter::{InputEdit, Language, Parser, Query, QueryCursor};
+use crate::theme::Style;
+use crate::THEME;
+use tree_sitter::{Language, Parser, Query, QueryCursor};
 
 extern "C" {
     fn tree_sitter_json() -> Language;
@@ -25,7 +27,7 @@ pub struct Region {
     pub index: usize,
     pub start_byte: usize,
     pub end_byte: usize,
-    pub color: (u8, u8, u8),
+    pub style: Style,
 }
 
 impl TreeSitterHighlight {
@@ -50,11 +52,8 @@ impl Highlight for TreeSitterHighlight {
 
         let matches = cur.matches(&self.query, tree.root_node(), input);
         for m in matches {
-            let color = match kind[m.pattern_index].as_str() {
-                "keyword" => (255, 0, 0),
-                "string" => (0, 255, 0),
-                _ => (255, 255, 255),
-            };
+            let name = kind[m.pattern_index].as_str();
+
             println!("{}", kind[m.pattern_index]);
             for cap in m.captures {
                 let start = cap.node.range().start_byte;
@@ -63,7 +62,7 @@ impl Highlight for TreeSitterHighlight {
                     index: m.pattern_index,
                     start_byte: start,
                     end_byte: end,
-                    color,
+                    style: THEME.scope(name),
                 })
             }
         }

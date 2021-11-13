@@ -1,23 +1,16 @@
 mod buffer;
 mod editor;
 mod highlight;
+mod theme;
 
-#[macro_use]
 extern crate druid;
 
 use crate::editor::TextEditor;
-use druid::text::Editor;
-use druid::widget::{
-    Align, Click, Container, ControllerHost, Flex, FlexParams, Label, Padding, Painter, TextBox,
-};
-use druid::{
-    AppLauncher, Color, Data, Env, FontDescriptor, FontFamily, FontStyle, FontWeight, Insets, Key,
-    Lens, LocalizedString, RenderContext, Widget, WidgetExt, WindowDesc,
-};
+use crate::theme::Theme;
+use druid::widget::{Flex, Label, Padding, Painter};
+use druid::*;
 use std::ops::Sub;
 
-const VERTICAL_WIDGET_SPACING: f64 = 20.0;
-const TEXT_BOX_WIDTH: f64 = 200.0;
 const WINDOW_TITLE: LocalizedString<AppState> = LocalizedString::new("Hello World!");
 
 pub const FONT: Key<FontDescriptor> = Key::new("ui.font");
@@ -26,6 +19,10 @@ pub const EDITOR_FONT: Key<FontDescriptor> = Key::new("editor.font");
 #[derive(Clone, Data, Lens)]
 struct AppState {
     text: String,
+}
+
+lazy_static::lazy_static! {
+    pub static ref THEME: Theme = toml::from_str(include_str!("../runtime/themes/onedark.toml")).unwrap();
 }
 
 fn main() {
@@ -63,7 +60,7 @@ fn build_root_widget() -> impl Widget<AppState> {
         .with_default_spacer();
 
     // center the two widgets in the available space
-    layout.env_scope(|env: &mut druid::Env, data: &AppState| {
+    layout.env_scope(|env: &mut druid::Env, _data: &AppState| {
         env.set(
             FONT,
             FontDescriptor::new(FontFamily::new_unchecked("Segoe UI"))
@@ -103,7 +100,7 @@ fn button(text: &str) -> impl Widget<AppState> {
 
     Padding::new(Insets::new(18.0, 5.0, 18.0, 5.0), button)
         .background(my_painter)
-        .on_click(|e, data: &mut AppState, _| {})
+        .on_click(|_, _data: &mut AppState, _| {})
 }
 
 fn editor() -> impl Widget<AppState> {

@@ -1,22 +1,19 @@
 use std::cmp::{max, min};
 use std::io::Cursor;
-use std::ops::RangeBounds;
 
 use druid::kurbo::Line;
 use druid::piet::{
     D2DTextLayout, D2DTextLayoutBuilder, Text, TextAttribute, TextLayout, TextLayoutBuilder,
 };
-use druid::text::Editor;
 use druid::{
-    BoxConstraints, Code, Color, Env, Event, EventCtx, FontDescriptor, KeyEvent, LayoutCtx,
-    LifeCycle, LifeCycleCtx, PaintCtx, Point, RenderContext, Size, TextAlignment, UpdateCtx,
-    Widget,
+    BoxConstraints, Code, Color, Env, Event, EventCtx, FontDescriptor, FontStyle, LayoutCtx,
+    LifeCycle, LifeCycleCtx, PaintCtx, Point, RenderContext, Size, UpdateCtx, Widget,
 };
 use ropey::RopeSlice;
 
 use crate::buffer::{Buffer, Movement};
 use crate::highlight::{Highlight, Region, TreeSitterHighlight};
-use crate::{AppState, EDITOR_FONT, FONT};
+use crate::{AppState, FontWeight, EDITOR_FONT, THEME};
 
 pub struct TextEditor {
     buffer: Buffer,
@@ -39,7 +36,7 @@ impl TextEditor {
 }
 
 impl Widget<AppState> for TextEditor {
-    fn event(&mut self, ctx: &mut EventCtx, event: &Event, data: &mut AppState, env: &Env) {
+    fn event(&mut self, ctx: &mut EventCtx, event: &Event, _data: &mut AppState, _env: &Env) {
         match event {
             Event::KeyDown(key) => {
                 match key.code {
@@ -51,32 +48,39 @@ impl Widget<AppState> for TextEditor {
                 }
                 ctx.request_paint()
             }
-            Event::MouseDown(mouse) => ctx.request_focus(),
+            Event::MouseDown(_) => ctx.request_focus(),
             _ => {}
         }
     }
 
-    fn lifecycle(&mut self, ctx: &mut LifeCycleCtx, event: &LifeCycle, data: &AppState, env: &Env) {
+    fn lifecycle(
+        &mut self,
+        _ctx: &mut LifeCycleCtx,
+        _event: &LifeCycle,
+        _data: &AppState,
+        _env: &Env,
+    ) {
     }
 
-    fn update(&mut self, ctx: &mut UpdateCtx, old_data: &AppState, data: &AppState, env: &Env) {}
+    fn update(&mut self, _ctx: &mut UpdateCtx, _old_data: &AppState, _data: &AppState, _env: &Env) {
+    }
 
     fn layout(
         &mut self,
-        ctx: &mut LayoutCtx,
+        _ctx: &mut LayoutCtx,
         bc: &BoxConstraints,
-        data: &AppState,
-        env: &Env,
+        _data: &AppState,
+        _env: &Env,
     ) -> Size {
         bc.max()
     }
 
-    fn paint(&mut self, ctx: &mut PaintCtx, data: &AppState, env: &Env) {
+    fn paint(&mut self, ctx: &mut PaintCtx, _data: &AppState, env: &Env) {
         let rect = ctx.size().to_rect();
-        ctx.fill(rect, &Color::BLACK);
+        let bg = THEME.scope("ui.background").bg();
+        ctx.fill(rect, &bg);
 
         let cursor = self.buffer.cursor();
-        println!("{}", cursor);
         self.layouts = vec![];
         let rope = self.buffer.rope();
         let mut y = 0.0;
@@ -94,10 +98,28 @@ impl Widget<AppState> for TextEditor {
                 if start < end {
                     let start_char = rope.byte_to_char(start - byte_start);
                     let end_char = rope.byte_to_char(end - byte_start);
-                    builder = builder.range_attribute(
-                        start_char..end_char,
-                        TextAttribute::TextColor(Color::rgb8(r.color.0, r.color.1, r.color.2)),
-                    );
+
+                    let range = start_char..end_char;
+
+                    builder = builder
+                        .range_attribute(range.clone(), TextAttribute::TextColor(r.style.fg()));
+
+                    if r.style.bold() {
+                        builder = builder.range_attribute(
+                            range.clone(),
+                            TextAttribute::Weight(FontWeight::BOLD),
+                        );
+                    }
+                    if r.style.italic() {
+                        builder = builder.range_attribute(
+                            range.clone(),
+                            TextAttribute::Style(FontStyle::Italic),
+                        );
+                    }
+                    if r.style.underline() {
+                        builder =
+                            builder.range_attribute(range.clone(), TextAttribute::Underline(true));
+                    }
                 }
             }
 
@@ -131,7 +153,7 @@ impl Widget<AppState> for TextEditor {
 
 fn text_layout(ctx: &mut PaintCtx, env: &Env, text: RopeSlice) -> D2DTextLayoutBuilder {
     let font: FontDescriptor = env.get(EDITOR_FONT);
-    let mut builder = ctx
+    let builder = ctx
         .text()
         .new_text_layout(text.as_str().unwrap().to_string())
         .text_color(Color::WHITE)
