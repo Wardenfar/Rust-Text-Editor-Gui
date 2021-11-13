@@ -113,17 +113,21 @@ impl Widget<AppState> for TextEditor {
         let bg = THEME.scope("ui.background").bg();
         ctx.fill(rect, &bg);
 
+        ctx.save();
+        ctx.clip(rect);
+
         let cursor = self.buffer.cursor();
         self.layouts = vec![];
         let rope = self.buffer.rope();
         let mut y = 0.0;
         for line in 0..rope.len_lines() {
             let bounds = self.buffer.line_bounds(line);
+            let slice = rope.slice(bounds.0..bounds.1);
 
             let byte_start = rope.char_to_byte(bounds.0);
             let byte_end = rope.char_to_byte(bounds.1);
 
-            let mut builder = text_layout(ctx, env, rope.slice(bounds.0..bounds.1));
+            let mut builder = text_layout(ctx, env, slice);
 
             for r in &self.regions {
                 let start = max(byte_start, r.start_byte);
@@ -158,9 +162,9 @@ impl Widget<AppState> for TextEditor {
 
             let layout = builder.build().unwrap();
 
-            let char_width = (layout.size().width + layout.trailing_whitespace_width())
-                / (bounds.1 - bounds.0) as f64
-                / 2.0;
+            let slice_without_trailing = slice.as_str().unwrap().trim_end().len();
+
+            let char_width = (layout.size().width / slice_without_trailing as f64);
 
             ctx.draw_text(&layout, Point::new(0.0, y));
 
@@ -176,15 +180,15 @@ impl Widget<AppState> for TextEditor {
             y += layout.size().height + 4.0;
             self.layouts.push(layout);
         }
+
+        ctx.restore().unwrap()
     }
 }
 
 fn text_layout(ctx: &mut PaintCtx, env: &Env, text: RopeSlice) -> D2DTextLayoutBuilder {
     let font: FontDescriptor = env.get(EDITOR_FONT);
-    let builder = ctx
-        .text()
+    ctx.text()
         .new_text_layout(text.as_str().unwrap().to_string())
         .text_color(Color::WHITE)
-        .font(font.family, font.size);
-    builder
+        .font(font.family, font.size)
 }
