@@ -89,8 +89,8 @@ impl Highlight for TreeSitterHighlight {
             .iter()
             .filter(|r| {
                 !regions.iter().any(|r_top| {
-                    r_top.start_byte == r.start_byte
-                        && r_top.end_byte == r.end_byte
+                    r_top.start_byte <= r.start_byte
+                        && r_top.end_byte >= r.end_byte
                         && r_top.index < r.index
                 })
             })

@@ -196,7 +196,7 @@ mod tests {
     #[test]
     fn bounds_3() {
         let input = "{\na}";
-        let mut buf = Buffer::from_reader(Cursor::new(input));
+        let buf = Buffer::from_reader(Cursor::new(input));
         assert_eq!(buf.line_bounds(0), (0, 1));
         assert_eq!(buf.line_bounds(1), (2, 4));
     }

@@ -3,18 +3,15 @@ use std::fs::File;
 use std::io::Cursor;
 
 use druid::kurbo::Line;
-use druid::piet::{
-    D2DTextLayout, D2DTextLayoutBuilder, Text, TextAttribute, TextLayout, TextLayoutBuilder,
-};
-use druid::{
-    BoxConstraints, Code, Color, Env, Event, EventCtx, FontDescriptor, FontStyle, LayoutCtx,
-    LifeCycle, LifeCycleCtx, PaintCtx, Point, RenderContext, Size, UpdateCtx, Widget,
-};
+use druid::piet::*;
+use druid::*;
+use itertools::Itertools;
 use ropey::RopeSlice;
 
 use crate::buffer::{Action, Buffer, Movement};
 use crate::highlight::{Highlight, Region, TreeSitterHighlight};
-use crate::{AppState, FontWeight, EDITOR_FONT, THEME};
+use crate::theme::Style;
+use crate::{AppState, FontFamily, FontWeight, THEME};
 
 pub struct TextEditor {
     buffer: Buffer,
@@ -48,6 +45,75 @@ impl TextEditor {
             .highlight
             .parse(self.buffer.rope().slice(..).as_str().unwrap().as_bytes());
         self.regions = regions;
+    }
+
+    fn build_parts<'a>(
+        ctx: &mut PaintCtx,
+        env: &Env,
+        global_start: usize,
+        slice: RopeSlice<'a>,
+        cuts: &Vec<Cut>,
+    ) -> Vec<TextPart<'a>> {
+        let mut parts = Vec::new();
+
+        for cut in cuts {
+            let start = cut.start;
+            let end = cut.end;
+
+            let mut builder = text_layout(ctx, env, slice.slice(start..end), &cut.style);
+
+            let style = &cut.style;
+
+            builder = builder.range_attribute(.., TextAttribute::TextColor(style.fg()));
+
+            if style.bold() {
+                builder = builder.range_attribute(.., TextAttribute::Weight(FontWeight::BOLD));
+            }
+            if style.italic() {
+                builder = builder.range_attribute(.., TextAttribute::Style(FontStyle::Italic));
+            }
+            if style.underline() {
+                builder = builder.range_attribute(.., TextAttribute::Underline(true));
+            }
+
+            let layout = builder.build().unwrap();
+
+            parts.push(TextPart {
+                layout,
+                slice: slice.slice(start..end),
+                start_char: global_start + cut.start,
+                end_char: global_start + cut.end,
+                style: style.clone(),
+            });
+        }
+        parts
+    }
+
+    fn find_cuts(line_size: usize, regions: &Vec<Region>) -> Vec<Cut> {
+        let mut cuts = Vec::new();
+
+        let mut last_index = 0;
+        for r in regions.iter().sorted_by_key(|r| r.start_byte) {
+            if r.start_byte > last_index {
+                cuts.push(Cut {
+                    start: last_index,
+                    end: r.start_byte,
+                    style: Style::default(),
+                });
+            }
+            cuts.push(Cut {
+                start: r.start_byte,
+                end: r.end_byte,
+                style: r.style.clone(),
+            });
+            last_index = r.end_byte;
+        }
+        cuts.push(Cut {
+            start: last_index,
+            end: line_size,
+            style: Style::default(),
+        });
+        cuts
     }
 }
 
@@ -142,73 +208,91 @@ impl Widget<AppState> for TextEditor {
         let mut y = 0.0;
         for line in 0..rope.len_lines() {
             let bounds = self.buffer.line_bounds(line);
+            let line_size = bounds.1 - bounds.0;
             let slice = rope.slice(bounds.0..bounds.1);
 
             let byte_start = rope.char_to_byte(bounds.0);
             let byte_end = rope.char_to_byte(bounds.1);
 
-            let mut builder = text_layout(ctx, env, slice);
-
-            for r in &self.regions {
-                let start = max(byte_start, r.start_byte);
-                let end = min(byte_end, r.end_byte);
-                if start < end {
-                    let start_char = rope.byte_to_char(start - byte_start);
-                    let end_char = rope.byte_to_char(end - byte_start);
-
-                    let range = start_char..end_char;
-
-                    builder = builder
-                        .range_attribute(range.clone(), TextAttribute::TextColor(r.style.fg()));
-
-                    if r.style.bold() {
-                        builder = builder.range_attribute(
-                            range.clone(),
-                            TextAttribute::Weight(FontWeight::BOLD),
-                        );
+            let regions = self
+                .regions
+                .iter()
+                .filter_map(|r| {
+                    let start = max(byte_start, r.start_byte);
+                    let end = min(byte_end, r.end_byte);
+                    if start < end {
+                        let start_char = rope.byte_to_char(start - byte_start);
+                        let end_char = rope.byte_to_char(end - byte_start);
+                        Some(Region {
+                            index: r.index,
+                            start_byte: start_char,
+                            end_byte: end_char,
+                            style: r.style.clone(),
+                        })
+                    } else {
+                        None
                     }
-                    if r.style.italic() {
-                        builder = builder.range_attribute(
-                            range.clone(),
-                            TextAttribute::Style(FontStyle::Italic),
-                        );
-                    }
-                    if r.style.underline() {
-                        builder =
-                            builder.range_attribute(range.clone(), TextAttribute::Underline(true));
-                    }
+                })
+                .collect::<Vec<_>>();
+
+            let cuts = Self::find_cuts(line_size, &regions);
+            let parts = Self::build_parts(ctx, env, bounds.0, slice, &cuts);
+
+            let max_height = parts
+                .iter()
+                .map(|l| l.layout.size().height)
+                .max_by(|a, b| a.partial_cmp(b).unwrap())
+                .unwrap();
+
+            let mut x = 0.0;
+            for part in &parts {
+                ctx.draw_text(&part.layout, Point::new(x, y));
+
+                if part.start_char <= cursor && cursor <= part.end_char {
+                    let hit = part.layout.hit_test_text_position(cursor - part.start_char);
+                    let curr_x = x + hit.point.x;
+                    let line = Line::new(
+                        Point::new(curr_x, y),
+                        Point::new(curr_x, y + max_height + 4.0),
+                    );
+                    ctx.stroke(line, &Color::RED, 1.0);
                 }
+
+                x += part.layout.trailing_whitespace_width();
             }
 
-            let layout = builder.build().unwrap();
-
-            let slice_without_trailing = slice.as_str().unwrap().trim_end().len();
-
-            let char_width = layout.size().width / slice_without_trailing as f64;
-
-            ctx.draw_text(&layout, Point::new(0.0, y));
-
-            if bounds.0 <= cursor && cursor <= bounds.1 {
-                let x = char_width * (cursor - bounds.0) as f64;
-                let line = Line::new(
-                    Point::new(x, y),
-                    Point::new(x, y + layout.size().height + 4.0),
-                );
-                ctx.stroke(line, &Color::RED, 1.0);
-            }
-
-            y += layout.size().height + 4.0;
-            self.layouts.push(layout);
+            y += max_height + 4.0;
         }
 
         ctx.restore().unwrap()
     }
 }
 
-fn text_layout(ctx: &mut PaintCtx, env: &Env, text: RopeSlice) -> D2DTextLayoutBuilder {
-    let font: FontDescriptor = env.get(EDITOR_FONT);
+pub struct TextPart<'a> {
+    pub layout: D2DTextLayout,
+    pub slice: RopeSlice<'a>,
+    pub start_char: usize,
+    pub end_char: usize,
+    pub style: Style,
+}
+
+pub struct Cut {
+    pub start: usize,
+    pub end: usize,
+    pub style: Style,
+}
+
+fn text_layout(
+    ctx: &mut PaintCtx,
+    _env: &Env,
+    text: RopeSlice,
+    style: &Style,
+) -> D2DTextLayoutBuilder {
     ctx.text()
         .new_text_layout(text.as_str().unwrap().to_string())
         .text_color(Color::WHITE)
-        .font(font.family, font.size)
+        .font(
+            FontFamily::new_unchecked(style.font_family()),
+            style.font_size(),
+        )
 }

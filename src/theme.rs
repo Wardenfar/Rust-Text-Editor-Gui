@@ -14,6 +14,8 @@ pub struct Theme {
 pub struct Style {
     fg: Color,
     bg: Color,
+    font_family: String,
+    font_size: f64,
     modifiers: Vec<Modifier>,
 }
 
@@ -28,8 +30,18 @@ impl Style {
         Style {
             fg: Color::WHITE,
             bg: Color::BLACK,
+            font_family: "Roboto Mono".into(),
+            font_size: 18.0,
             modifiers: vec![],
         }
+    }
+
+    pub fn font_family(&self) -> String {
+        self.font_family.clone()
+    }
+
+    pub fn font_size(&self) -> f64 {
+        self.font_size
     }
 
     pub fn fg(&self) -> Color {
@@ -195,6 +207,8 @@ impl ThemePalette {
                 match name.as_str() {
                     "fg" => style.fg = self.parse_color(value)?,
                     "bg" => style.bg = self.parse_color(value)?,
+                    "font" => style.font_family = Self::parse_value_as_str(&value).unwrap().into(),
+                    "size" => style.font_size = value.as_float().unwrap(),
                     "modifiers" => {
                         let modifiers = value
                             .as_array()

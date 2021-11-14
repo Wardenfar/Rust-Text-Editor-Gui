@@ -26,6 +26,8 @@ lazy_static::lazy_static! {
 }
 
 fn main() {
+    dbg!(THEME.scope("keyword"));
+
     // describe the main window
     let main_window = WindowDesc::new(build_root_widget)
         .title(WINDOW_TITLE)
@@ -119,11 +121,11 @@ struct Delegate;
 impl AppDelegate<AppState> for Delegate {
     fn command(
         &mut self,
-        ctx: &mut DelegateCtx,
-        target: Target,
+        _ctx: &mut DelegateCtx,
+        _target: Target,
         cmd: &Command,
         data: &mut AppState,
-        env: &Env,
+        _env: &Env,
     ) -> Handled {
         if let Some(file_info) = cmd.get(commands::OPEN_FILE) {
             data.file_path = file_info.path().to_str().map(|s| s.to_string());

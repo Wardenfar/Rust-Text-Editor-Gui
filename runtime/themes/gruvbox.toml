@@ -2,7 +2,7 @@
 # The theme uses the gruvbox dark palette with standard contrast: github.com/morhetz/gruvbox
 
 "attribute" = "aqua1"
-"keyword" = { fg = "red1" }
+"keyword" = { fg = "red1", font = "Segoe UI" }
 "keyword.directive" = "red0"
 "namespace" = "aqua1"
 "punctuation" = "orange1"
