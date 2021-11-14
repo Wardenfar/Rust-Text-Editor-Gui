@@ -1,6 +1,6 @@
 use ropey::Rope;
 use std::cell::Cell;
-use std::cmp::{max, min};
+use std::cmp::min;
 use std::io::Read;
 
 pub struct Buffer {

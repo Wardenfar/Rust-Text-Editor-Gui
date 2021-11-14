@@ -1,4 +1,5 @@
 use std::cmp::{max, min};
+use std::fs::File;
 use std::io::Cursor;
 
 use druid::kurbo::Line;
@@ -24,7 +25,7 @@ pub struct TextEditor {
 
 impl TextEditor {
     pub fn new() -> Self {
-        let buffer = Buffer::from_reader(Cursor::new(include_str!("../file.json")));
+        let buffer = Buffer::from_reader(Cursor::new("no file opened"));
 
         let highlight = TreeSitterHighlight::new();
         let mut editor = Self {
@@ -35,6 +36,11 @@ impl TextEditor {
         };
         editor.calculate_highlight();
         editor
+    }
+
+    pub fn read_file(&mut self, path: &String) {
+        self.buffer = Buffer::from_reader(File::open(path).unwrap());
+        self.calculate_highlight()
     }
 
     pub fn calculate_highlight(&mut self) {
@@ -89,13 +95,27 @@ impl Widget<AppState> for TextEditor {
     fn lifecycle(
         &mut self,
         _ctx: &mut LifeCycleCtx,
-        _event: &LifeCycle,
-        _data: &AppState,
+        event: &LifeCycle,
+        data: &AppState,
         _env: &Env,
     ) {
+        match event {
+            LifeCycle::WidgetAdded => {
+                if let Some(path) = &data.file_path {
+                    self.read_file(path);
+                }
+            }
+            _ => {}
+        }
     }
 
-    fn update(&mut self, _ctx: &mut UpdateCtx, _old_data: &AppState, _data: &AppState, _env: &Env) {
+    fn update(&mut self, ctx: &mut UpdateCtx, old_data: &AppState, data: &AppState, _env: &Env) {
+        if old_data.file_path != data.file_path {
+            if let Some(path) = &data.file_path {
+                self.read_file(path);
+                ctx.request_paint();
+            }
+        }
     }
 
     fn layout(
@@ -113,7 +133,7 @@ impl Widget<AppState> for TextEditor {
         let bg = THEME.scope("ui.background").bg();
         ctx.fill(rect, &bg);
 
-        ctx.save();
+        ctx.save().unwrap();
         ctx.clip(rect);
 
         let cursor = self.buffer.cursor();
@@ -164,7 +184,7 @@ impl Widget<AppState> for TextEditor {
 
             let slice_without_trailing = slice.as_str().unwrap().trim_end().len();
 
-            let char_width = (layout.size().width / slice_without_trailing as f64);
+            let char_width = layout.size().width / slice_without_trailing as f64;
 
             ctx.draw_text(&layout, Point::new(0.0, y));
 

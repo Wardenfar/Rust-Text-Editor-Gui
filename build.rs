@@ -1,11 +1,27 @@
 use std::path::PathBuf;
 
 fn main() {
-    let dir: PathBuf = ["languages", "tree-sitter-json", "src"].iter().collect();
+    let langs = ["tree-sitter-json", "tree-sitter-python"];
 
-    cc::Build::new()
-        .include(&dir)
-        .file(dir.join("parser.c"))
-        // .file(dir.join("scanner.c"))
-        .compile("tree-sitter-json");
+    for name in langs {
+        let dir: PathBuf = ["languages", name, "src"].iter().collect();
+
+        let parser = dir.join("parser.c");
+        let scanner = dir.join("scanner.c");
+        let scanner_cpp = dir.join("scanner.cc");
+
+        let mut builder = cc::Build::new();
+        let builder = builder.include(&dir);
+        builder.file(parser);
+
+        if scanner.exists() {
+            builder.file(scanner);
+        }
+        if scanner_cpp.exists() {
+            builder.file(scanner_cpp);
+            builder.cpp(true);
+        }
+
+        builder.compile(name);
+    }
 }
