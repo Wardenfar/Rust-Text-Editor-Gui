@@ -1,8 +1,8 @@
+use anyhow::Context;
 use std::cmp::{max, min};
 use std::fs::File;
 use std::io::Cursor;
-use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::path::PathBuf;
 
 use druid::kurbo::Line;
 use druid::piet::*;
@@ -13,7 +13,7 @@ use ropey::RopeSlice;
 
 use crate::buffer::{Action, Buffer, Movement};
 use crate::highlight::{Highlight, Region, TreeSitterHighlight};
-use crate::lsp::{LspClient, LspInput};
+use crate::lsp::{LspClient, LspInput, LspOutput};
 use crate::theme::Style;
 use crate::{AppState, FontFamily, FontWeight, THEME};
 
@@ -22,7 +22,17 @@ pub struct TextEditor {
     layouts: Vec<D2DTextLayout>,
     regions: Vec<Region>,
     highlight: TreeSitterHighlight,
-    lsp_client: Arc<LspClient>,
+    lsp_client: LspClient,
+}
+
+impl TextEditor {
+    pub fn do_action(&mut self, action: Action) -> bool {
+        let lsp_input = self.buffer.do_action(action);
+        if let Some(lsp_input) = lsp_input {
+            self.lsp_client.input_channel.send(lsp_input).unwrap();
+        }
+        true
+    }
 }
 
 impl TextEditor {
@@ -37,7 +47,7 @@ impl TextEditor {
             layouts: vec![],
             regions: vec![],
             highlight,
-            lsp_client: Arc::new(lsp_client),
+            lsp_client,
         };
         editor.calculate_highlight();
         editor
@@ -49,18 +59,18 @@ impl TextEditor {
 
         let url = Url::parse(&format!("file://localhost/{}", abs.to_str().unwrap())).unwrap();
 
-        {
-            let lsp_client = self.lsp_client.clone();
-            self.buffer =
-                Buffer::from_reader_lsp(File::open(path).unwrap(), url.clone(), lsp_client);
-        }
+        self.buffer = Buffer::from_reader_lsp(File::open(path).unwrap(), url.clone());
 
         self.calculate_highlight();
 
-        self.lsp_client.input_channel.send(LspInput::OpenFile {
-            url,
-            content: self.buffer.text().into(),
-        });
+        self.lsp_client
+            .input_channel
+            .send(LspInput::OpenFile {
+                url,
+                content: self.buffer.text().into(),
+            })
+            .context("lsp: open file")
+            .unwrap();
     }
 
     pub fn calculate_highlight(&mut self) {
@@ -83,7 +93,12 @@ impl TextEditor {
             let start = cut.start;
             let end = cut.end;
 
-            let mut builder = text_layout(ctx, env, slice.slice(start..end), &cut.style);
+            let mut builder = text_layout(
+                ctx,
+                env,
+                slice.slice(start..end).as_str().unwrap(),
+                &cut.style,
+            );
 
             let style = &cut.style;
 
@@ -145,6 +160,56 @@ impl Widget<AppState> for TextEditor {
         match event {
             Event::KeyDown(key) => {
                 let dirty = match &key.code {
+                    Code::Space if key.mods.ctrl() => {
+                        if let Some(lsp_data) = &self.buffer.lsp_data {
+                            self.lsp_client
+                                .input_channel
+                                .send(LspInput::RequestCompletion {
+                                    url: lsp_data.url.clone(),
+                                    row: self.buffer.row() as u32,
+                                    col: self.buffer.col() as u32,
+                                })
+                                .context("lsp request completion")
+                                .unwrap();
+                        }
+                        false
+                    }
+                    Code::F1 => {
+                        let cursor = self.buffer.cursor();
+                        let compl = if let Some(lsp_data) = &self.buffer.lsp_data {
+                            if let Some(c) = lsp_data.completions.get(0) {
+                                Some(c.clone())
+                            } else {
+                                None
+                            }
+                        } else {
+                            None
+                        };
+                        if let Some(c) = compl {
+                            self.buffer.insert(cursor, &c.insert_text);
+                            true
+                        } else {
+                            false
+                        }
+                    }
+                    Code::F2 => {
+                        let cursor = self.buffer.cursor();
+                        let compl = if let Some(lsp_data) = &self.buffer.lsp_data {
+                            if let Some(c) = lsp_data.completions.get(1) {
+                                Some(c.clone())
+                            } else {
+                                None
+                            }
+                        } else {
+                            None
+                        };
+                        if let Some(c) = compl {
+                            self.buffer.insert(cursor, &c.insert_text);
+                            true
+                        } else {
+                            false
+                        }
+                    }
                     Code::Escape => {
                         println!("{:?}", self.buffer.text());
                         false
@@ -153,9 +218,9 @@ impl Widget<AppState> for TextEditor {
                     Code::ArrowLeft => self.buffer.move_cursor(Movement::Left),
                     Code::ArrowRight => self.buffer.move_cursor(Movement::Right),
                     Code::ArrowUp => self.buffer.move_cursor(Movement::Up),
-                    Code::Backspace => self.buffer.do_action(Action::Backspace),
-                    Code::Delete => self.buffer.do_action(Action::Delete),
-                    Code::Enter => self.buffer.do_action(Action::Insert("\n".into())),
+                    Code::Backspace => self.do_action(Action::Backspace),
+                    Code::Delete => self.do_action(Action::Delete),
+                    Code::Enter => self.do_action(Action::Insert("\n".into())),
                     _ => {
                         let code = key.key.legacy_charcode();
                         if code == 0 {
@@ -178,6 +243,17 @@ impl Widget<AppState> for TextEditor {
             }
             Event::MouseDown(_) => ctx.request_focus(),
             _ => {}
+        }
+
+        if let Ok(data) = self.lsp_client.output_channel.try_recv() {
+            match data {
+                LspOutput::Completion(completions) => {
+                    if let Some(lsp_data) = &mut self.buffer.lsp_data {
+                        lsp_data.completions = completions;
+                        ctx.request_paint();
+                    }
+                }
+            }
         }
     }
 
@@ -224,6 +300,8 @@ impl Widget<AppState> for TextEditor {
 
         ctx.save().unwrap();
         ctx.clip(rect);
+
+        let mut cursor_point = None;
 
         let cursor = self.buffer.cursor();
         self.layouts = vec![];
@@ -278,6 +356,7 @@ impl Widget<AppState> for TextEditor {
                         Point::new(curr_x, y),
                         Point::new(curr_x, y + max_height + 4.0),
                     );
+                    cursor_point = Some((curr_x, y + max_height + 4.0));
                     ctx.stroke(line, &Color::RED, 1.0);
                 }
 
@@ -285,6 +364,23 @@ impl Widget<AppState> for TextEditor {
             }
 
             y += max_height + 4.0;
+        }
+
+        let cursor_point = cursor_point.unwrap_or((0.0, 0.0));
+
+        if let Some(lsp_data) = &self.buffer.lsp_data {
+            let text = lsp_data.completions.iter().map(|c| &c.label).join("\n");
+            let layout = text_layout(ctx, env, &text, &Style::default())
+                .build()
+                .unwrap();
+            let rect = Rect::new(
+                cursor_point.0,
+                cursor_point.1,
+                cursor_point.0 + layout.size().width,
+                cursor_point.1 + layout.size().height,
+            );
+            ctx.fill(rect, &Color::BLACK);
+            ctx.draw_text(&layout, Point::new(cursor_point.0, cursor_point.1))
         }
 
         ctx.restore().unwrap()
@@ -305,14 +401,9 @@ pub struct Cut {
     pub style: Style,
 }
 
-fn text_layout(
-    ctx: &mut PaintCtx,
-    _env: &Env,
-    text: RopeSlice,
-    style: &Style,
-) -> D2DTextLayoutBuilder {
+fn text_layout(ctx: &mut PaintCtx, _env: &Env, text: &str, style: &Style) -> D2DTextLayoutBuilder {
     ctx.text()
-        .new_text_layout(text.as_str().unwrap().to_string())
+        .new_text_layout(text.to_string())
         .text_color(Color::WHITE)
         .font(
             FontFamily::new_unchecked(style.font_family()),

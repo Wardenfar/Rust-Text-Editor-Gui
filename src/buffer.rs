@@ -1,41 +1,22 @@
-use crate::lsp::{LspClient, LspInput};
-use lsp_types::{Position, Range, Url};
-use ropey::Rope;
-use std::cell::Cell;
 use std::cmp::min;
 use std::io::Read;
-use std::ops::Deref;
 use std::sync::atomic::{AtomicI32, Ordering};
-use std::sync::Arc;
+
+use lsp_types::{Position, Url};
+use ropey::Rope;
+
+use crate::lsp::{LspCompletion, LspInput};
 
 pub struct Buffer {
     rope: Rope,
-    cursor: Cell<usize>,
+    cursor: usize,
     version: AtomicI32,
-    pub url: Option<Url>,
-    pub lsp_client: Option<Arc<LspClient>>,
+    pub lsp_data: Option<LspData>,
 }
 
-impl Buffer {
-    pub fn from_reader<R: Read>(reader: R) -> Self {
-        Self {
-            rope: Rope::from_reader(reader).unwrap(),
-            cursor: Cell::new(0),
-            version: Default::default(),
-            url: None,
-            lsp_client: None,
-        }
-    }
-
-    pub fn from_reader_lsp<R: Read>(reader: R, url: Url, lsp_client: Arc<LspClient>) -> Self {
-        Self {
-            rope: Rope::from_reader(reader).unwrap(),
-            cursor: Cell::new(0),
-            version: Default::default(),
-            url: Some(url),
-            lsp_client: Some(lsp_client),
-        }
-    }
+pub struct LspData {
+    pub url: Url,
+    pub completions: Vec<LspCompletion>,
 }
 
 pub enum Movement {
@@ -52,6 +33,27 @@ pub enum Action {
 }
 
 impl Buffer {
+    pub fn from_reader<R: Read>(reader: R) -> Self {
+        Self {
+            rope: Rope::from_reader(reader).unwrap(),
+            cursor: 0,
+            version: Default::default(),
+            lsp_data: None,
+        }
+    }
+
+    pub fn from_reader_lsp<R: Read>(reader: R, url: Url) -> Self {
+        Self {
+            rope: Rope::from_reader(reader).unwrap(),
+            cursor: 0,
+            version: Default::default(),
+            lsp_data: Some(LspData {
+                url,
+                completions: vec![],
+            }),
+        }
+    }
+
     pub fn line_bounds(&self, line: usize) -> (usize, usize) {
         let start = if line > self.rope.len_lines() {
             self.rope.len_chars()
@@ -104,8 +106,8 @@ impl Buffer {
         cur - bounds.0
     }
 
-    pub fn move_cursor(&self, m: Movement) -> bool {
-        let cur = self.cursor.get();
+    pub fn move_cursor(&mut self, m: Movement) -> bool {
+        let cur = self.cursor;
         let line = self.row();
 
         let prev_line = self.line_bounds(line.saturating_sub(1));
@@ -140,22 +142,27 @@ impl Buffer {
             }
         };
 
-        self.cursor.set(min(new, max));
+        self.cursor = min(new, max);
 
-        if let Some(lsp_client) = &self.lsp_client {
-            if let Some(url) = &self.url {
-                lsp_client.deref().input_channel.send(LspInput::Cursor {
-                    url: url.clone(),
-                    row: self.row() as u32,
-                    col: self.col() as u32,
-                });
-            }
+        if let Some(lsp_data) = &mut self.lsp_data {
+            lsp_data.completions = vec![]
         }
+
+        // if let Some(data) = &self.lsp_data {
+        //     data.lsp_client
+        //         .deref()
+        //         .input_channel
+        //         .send(LspInput::RequestCompletion {
+        //             url: data.url.clone(),
+        //             row: self.row() as u32,
+        //             col: self.col() as u32,
+        //         });
+        // }
 
         false
     }
 
-    pub fn remove_chars(&mut self, mut start: usize, mut end: usize) {
+    pub fn remove_chars(&mut self, mut start: usize, mut end: usize) -> Option<LspInput> {
         if start > self.rope.len_chars() {
             start = self.rope.len_chars()
         }
@@ -164,7 +171,7 @@ impl Buffer {
         }
 
         if start == end {
-            return;
+            return None;
         }
 
         // delete crlf in one block
@@ -182,28 +189,24 @@ impl Buffer {
 
         let curr = self.cursor();
         if curr >= end {
-            self.cursor.set(curr - (end - start))
+            self.cursor = curr - (end - start)
         } else if curr >= start {
-            self.cursor.set(start)
+            self.cursor = start
         }
 
-        let start_pos = self.lsp_pos(start);
-        let end_pos = self.lsp_pos(end);
+        // let start_pos = self.lsp_pos(start);
+        // let end_pos = self.lsp_pos(end);
 
         self.rope.remove(start..end);
 
-        if let Some(lsp_client) = &self.lsp_client {
-            if let Some(url) = &self.url {
-                lsp_client.deref().input_channel.send(LspInput::Edit {
-                    url: url.clone(),
-                    version: self.version.fetch_add(1, Ordering::SeqCst),
-                    range: Range {
-                        start: start_pos,
-                        end: end_pos,
-                    },
-                    text: "".into(),
-                });
-            }
+        if let Some(data) = &self.lsp_data {
+            Some(LspInput::Edit {
+                url: data.url.clone(),
+                version: self.version.fetch_add(1, Ordering::SeqCst),
+                text: self.text().to_string(),
+            })
+        } else {
+            None
         }
     }
 
@@ -214,49 +217,38 @@ impl Buffer {
         }
     }
 
-    pub fn insert(&mut self, start: usize, chars: &str) {
+    pub fn insert(&mut self, start: usize, chars: &str) -> Option<LspInput> {
         let curr = self.cursor();
         if curr >= start {
-            self.cursor.set(curr + chars.chars().count())
+            self.cursor = curr + chars.chars().count()
         }
         self.rope.insert(start, chars);
 
-        let start_pos = self.lsp_pos(start);
-        let end_pos = self.lsp_pos(start + chars.chars().count());
+        // let start_pos = self.lsp_pos(start);
+        // let end_pos = self.lsp_pos(start + chars.chars().count());
 
-        if let Some(lsp_client) = &self.lsp_client {
-            if let Some(url) = &self.url {
-                lsp_client.deref().input_channel.send(LspInput::Edit {
-                    url: url.clone(),
-                    version: self.version.fetch_add(1, Ordering::SeqCst),
-                    range: Range {
-                        start: start_pos,
-                        end: end_pos,
-                    },
-                    text: chars.into(),
-                });
-            }
+        if let Some(data) = &self.lsp_data {
+            Some(LspInput::Edit {
+                url: data.url.clone(),
+                version: self.version.fetch_add(1, Ordering::SeqCst),
+                text: self.text().to_string(),
+            })
+        } else {
+            None
         }
     }
 
-    pub fn do_action(&mut self, a: Action) -> bool {
+    pub fn do_action(&mut self, a: Action) -> Option<LspInput> {
         let curr = self.cursor();
         match a {
-            Action::Insert(chars) => {
-                self.insert(curr, chars.as_str());
-            }
-            Action::Backspace => {
-                self.remove_chars(curr.saturating_sub(1), curr);
-            }
-            Action::Delete => {
-                self.remove_chars(curr, curr.saturating_add(1));
-            }
+            Action::Insert(chars) => self.insert(curr, chars.as_str()),
+            Action::Backspace => self.remove_chars(curr.saturating_sub(1), curr),
+            Action::Delete => self.remove_chars(curr, curr.saturating_add(1)),
         }
-        true
     }
 
     pub fn cursor(&self) -> usize {
-        self.cursor.get()
+        self.cursor
     }
 
     pub fn text(&self) -> &str {
@@ -266,8 +258,9 @@ impl Buffer {
 
 #[cfg(test)]
 mod tests {
-    use crate::buffer::{Buffer, Movement};
     use std::io::Cursor;
+
+    use crate::buffer::{Buffer, Movement};
 
     #[test]
     fn edit() {
@@ -351,7 +344,7 @@ xyzefv
         .trim()
         .to_string();
 
-        let b = Buffer::from_reader(Cursor::new(str));
+        let mut b = Buffer::from_reader(Cursor::new(str));
         assert_eq!(b.cursor(), 0);
         b.move_cursor(Movement::Right);
         assert_eq!(b.cursor(), 1);

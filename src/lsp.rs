@@ -1,32 +1,34 @@
 use std::collections::HashMap;
 use std::io::Write;
 use std::process;
-use std::process::Command;
 
 use anyhow::Context;
 use jsonrpc_core::Output;
 use lsp_types::{
-    lsp_notification, Range, TextDocumentContentChangeEvent, Url, VersionedTextDocumentIdentifier,
+    CompletionItem, CompletionResponse, TextDocumentContentChangeEvent, Url,
+    VersionedTextDocumentIdentifier,
 };
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use tokio::sync::mpsc;
 
 const ID_INIT: u64 = 0;
 const ID_COMPLETION: u64 = 1;
 
+#[derive(Debug)]
 pub struct LspClient {
     process: tokio::process::Child,
-    pub input_channel: tokio::sync::mpsc::UnboundedSender<LspInput>,
-    pub output_channel: tokio::sync::mpsc::UnboundedReceiver<String>,
+    pub input_channel: mpsc::UnboundedSender<LspInput>,
+    pub output_channel: mpsc::UnboundedReceiver<LspOutput>,
 }
 
+#[derive(Debug)]
 pub enum LspInput {
     Edit {
         url: Url,
         version: i32,
-        range: Range,
         text: String,
     },
-    Cursor {
+    RequestCompletion {
         url: Url,
         row: u32,
         col: u32,
@@ -40,9 +42,15 @@ pub enum LspInput {
     },
 }
 
+#[derive(Debug)]
 pub enum LspOutput {
-    Initialized,
-    Completion,
+    Completion(Vec<LspCompletion>),
+}
+
+#[derive(Debug, Clone)]
+pub struct LspCompletion {
+    pub label: String,
+    pub insert_text: String,
 }
 
 impl LspClient {
@@ -54,6 +62,7 @@ impl LspClient {
             .kill_on_drop(true)
             .spawn()?;
 
+        #[allow(deprecated)]
         let init = lsp_types::InitializeParams {
             process_id: Some(u32::from(process::id())),
             root_path: None,
@@ -69,21 +78,37 @@ impl LspClient {
         let mut stdin = lsp.stdin.take().context("take stdin")?;
         let mut reader = tokio::io::BufReader::new(lsp.stdout.take().context("take stdout")?);
 
-        // send_request::<_, lsp_types::request::Initialize>(&mut stdin, ID_INIT, init)?;
+        let (init_tx, mut init_rx) = mpsc::unbounded_channel();
+        let (tx, rx) = mpsc::unbounded_channel();
 
-        let (init_tx, mut init_rx) = tokio::sync::mpsc::unbounded_channel();
-        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
-
-        let (c_tx, mut c_rx) = tokio::sync::mpsc::unbounded_channel::<LspInput>();
+        let (c_tx, mut c_rx) = mpsc::unbounded_channel::<LspInput>();
         tokio::spawn(async move {
             send_request_async::<_, lsp_types::request::Initialize>(&mut stdin, ID_INIT, init)
                 .await?;
             // Wait initialize
             init_rx.recv().await.unwrap();
 
+            let mut version = 0;
+            let mut edited_text = String::new();
+
             while let Some(lsp_input) = c_rx.recv().await {
                 match lsp_input {
-                    LspInput::Cursor { row, col, url } => {
+                    LspInput::RequestCompletion { row, col, url } => {
+                        let edits = lsp_types::DidChangeTextDocumentParams {
+                            text_document: VersionedTextDocumentIdentifier {
+                                uri: url.clone(),
+                                version,
+                            },
+                            content_changes: vec![TextDocumentContentChangeEvent {
+                                range: None,
+                                range_length: None,
+                                text: edited_text.clone(),
+                            }],
+                        };
+                        send_notify_async::<_, lsp_types::notification::DidChangeTextDocument>(
+                            &mut stdin, edits,
+                        )
+                        .await?;
                         let completion = lsp_types::CompletionParams {
                             text_document_position: lsp_types::TextDocumentPositionParams {
                                 text_document: lsp_types::TextDocumentIdentifier { uri: url },
@@ -119,23 +144,10 @@ impl LspClient {
                     }
                     LspInput::CloseFile { .. } => {}
                     LspInput::Edit {
-                        version,
-                        url,
-                        range,
-                        text,
+                        version: v, text, ..
                     } => {
-                        let open = lsp_types::DidChangeTextDocumentParams {
-                            text_document: VersionedTextDocumentIdentifier { uri: url, version },
-                            content_changes: vec![TextDocumentContentChangeEvent {
-                                range: Some(range),
-                                range_length: None,
-                                text,
-                            }],
-                        };
-                        send_notify_async::<_, lsp_types::notification::DidChangeTextDocument>(
-                            &mut stdin, open,
-                        )
-                        .await?;
+                        version = v;
+                        edited_text = text;
                     }
                 }
             }
@@ -166,12 +178,16 @@ impl LspClient {
                 let output: serde_json::Result<Output> = serde_json::from_str(&msg);
                 if let Ok(Output::Success(suc)) = output {
                     println!("{}", suc.result);
-                    tx.send(format!("{}", suc.result));
                     if suc.id == jsonrpc_core::id::Id::Num(ID_INIT) {
                         init_tx.send(())?;
                     } else if suc.id == jsonrpc_core::id::Id::Num(ID_COMPLETION) {
                         let completion =
                             serde_json::from_value::<lsp_types::CompletionResponse>(suc.result)?;
+                        let completions = match completion {
+                            CompletionResponse::Array(arr) => convert_completions(arr),
+                            CompletionResponse::List(list) => convert_completions(list.items),
+                        };
+                        tx.send(LspOutput::Completion(completions))?;
                     }
                 }
             }
@@ -183,6 +199,18 @@ impl LspClient {
             input_channel: c_tx,
         })
     }
+}
+
+fn convert_completions(mut input: Vec<CompletionItem>) -> Vec<LspCompletion> {
+    input
+        .drain(..)
+        .filter_map(|c| {
+            c.insert_text.map(|insert_text| LspCompletion {
+                label: c.label,
+                insert_text,
+            })
+        })
+        .collect()
 }
 
 async fn send_request_async<T: AsyncWrite + std::marker::Unpin, R: lsp_types::request::Request>(
@@ -201,6 +229,7 @@ where
             id: jsonrpc_core::Id::Num(id),
         });
         let request = serde_json::to_string(&req)?;
+        println!("REQUEST: {}", request);
         let mut buffer: Vec<u8> = Vec::new();
         write!(
             &mut buffer,
@@ -232,6 +261,7 @@ where
             params: jsonrpc_core::Params::Map(params),
         };
         let request = serde_json::to_string(&req)?;
+        println!("NOTIFY: {}", request);
         let mut buf: Vec<u8> = Vec::new();
         write!(
             &mut buf,
