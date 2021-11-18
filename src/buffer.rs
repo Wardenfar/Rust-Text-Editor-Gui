@@ -1,11 +1,19 @@
+use crate::lsp::{LspClient, LspInput};
+use lsp_types::{Position, Range, Url};
 use ropey::Rope;
 use std::cell::Cell;
 use std::cmp::min;
 use std::io::Read;
+use std::ops::Deref;
+use std::sync::atomic::{AtomicI32, Ordering};
+use std::sync::Arc;
 
 pub struct Buffer {
     rope: Rope,
     cursor: Cell<usize>,
+    version: AtomicI32,
+    pub url: Option<Url>,
+    pub lsp_client: Option<Arc<LspClient>>,
 }
 
 impl Buffer {
@@ -13,6 +21,19 @@ impl Buffer {
         Self {
             rope: Rope::from_reader(reader).unwrap(),
             cursor: Cell::new(0),
+            version: Default::default(),
+            url: None,
+            lsp_client: None,
+        }
+    }
+
+    pub fn from_reader_lsp<R: Read>(reader: R, url: Url, lsp_client: Arc<LspClient>) -> Self {
+        Self {
+            rope: Rope::from_reader(reader).unwrap(),
+            cursor: Cell::new(0),
+            version: Default::default(),
+            url: Some(url),
+            lsp_client: Some(lsp_client),
         }
     }
 }
@@ -66,13 +87,26 @@ impl Buffer {
         &self.rope
     }
 
-    fn current_line(&self) -> usize {
-        self.rope.char_to_line(self.cursor.get())
+    pub fn col(&self) -> usize {
+        self.col_at(self.cursor())
+    }
+
+    pub fn row(&self) -> usize {
+        self.row_at(self.cursor())
+    }
+
+    pub fn row_at(&self, cur: usize) -> usize {
+        self.rope.char_to_line(cur)
+    }
+
+    pub fn col_at(&self, cur: usize) -> usize {
+        let bounds = self.line_bounds(self.row_at(cur));
+        cur - bounds.0
     }
 
     pub fn move_cursor(&self, m: Movement) -> bool {
         let cur = self.cursor.get();
-        let line = self.current_line();
+        let line = self.row();
 
         let prev_line = self.line_bounds(line.saturating_sub(1));
         let curr_line = self.line_bounds(line);
@@ -107,6 +141,17 @@ impl Buffer {
         };
 
         self.cursor.set(min(new, max));
+
+        if let Some(lsp_client) = &self.lsp_client {
+            if let Some(url) = &self.url {
+                lsp_client.deref().input_channel.send(LspInput::Cursor {
+                    url: url.clone(),
+                    row: self.row() as u32,
+                    col: self.col() as u32,
+                });
+            }
+        }
+
         false
     }
 
@@ -141,7 +186,32 @@ impl Buffer {
         } else if curr >= start {
             self.cursor.set(start)
         }
-        self.rope.remove(start..end)
+
+        let start_pos = self.lsp_pos(start);
+        let end_pos = self.lsp_pos(end);
+
+        self.rope.remove(start..end);
+
+        if let Some(lsp_client) = &self.lsp_client {
+            if let Some(url) = &self.url {
+                lsp_client.deref().input_channel.send(LspInput::Edit {
+                    url: url.clone(),
+                    version: self.version.fetch_add(1, Ordering::SeqCst),
+                    range: Range {
+                        start: start_pos,
+                        end: end_pos,
+                    },
+                    text: "".into(),
+                });
+            }
+        }
+    }
+
+    pub fn lsp_pos(&self, cur: usize) -> Position {
+        Position {
+            line: self.row_at(cur) as u32,
+            character: self.col_at(cur) as u32,
+        }
     }
 
     pub fn insert(&mut self, start: usize, chars: &str) {
@@ -150,6 +220,23 @@ impl Buffer {
             self.cursor.set(curr + chars.chars().count())
         }
         self.rope.insert(start, chars);
+
+        let start_pos = self.lsp_pos(start);
+        let end_pos = self.lsp_pos(start + chars.chars().count());
+
+        if let Some(lsp_client) = &self.lsp_client {
+            if let Some(url) = &self.url {
+                lsp_client.deref().input_channel.send(LspInput::Edit {
+                    url: url.clone(),
+                    version: self.version.fetch_add(1, Ordering::SeqCst),
+                    range: Range {
+                        start: start_pos,
+                        end: end_pos,
+                    },
+                    text: chars.into(),
+                });
+            }
+        }
     }
 
     pub fn do_action(&mut self, a: Action) -> bool {

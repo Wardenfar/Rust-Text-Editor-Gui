@@ -14,6 +14,14 @@ serde = "1.0.130"
 toml = "0.5.8"
 lazy_static = "1.4.0"
 itertools = "0.10.1"
+lsp-types = "0.91.1"
+serde_json = "1.0.71"
+anyhow = "1.0.45"
+jsonrpc-core = "18.0.0"
+
+[dependencies.tokio]
+version = "1.14.0"
+features = ["full"]
 
 [build-dependencies]
-cc="*"
+cc = "*"

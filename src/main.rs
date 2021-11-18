@@ -1,15 +1,18 @@
-mod buffer;
-mod editor;
-mod highlight;
-mod theme;
-
 extern crate druid;
+
+use std::ops::Sub;
+
+use druid::widget::{Flex, Label, Padding, Painter};
+use druid::*;
 
 use crate::editor::TextEditor;
 use crate::theme::Theme;
-use druid::widget::{Flex, Label, Padding, Painter};
-use druid::*;
-use std::ops::Sub;
+
+mod buffer;
+mod editor;
+mod highlight;
+mod lsp;
+mod theme;
 
 const WINDOW_TITLE: LocalizedString<AppState> = LocalizedString::new("Hello World!");
 
@@ -25,7 +28,8 @@ lazy_static::lazy_static! {
     pub static ref THEME: Theme = toml::from_str(include_str!("../runtime/themes/gruvbox.toml")).unwrap();
 }
 
-fn main() {
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
     dbg!(THEME.scope("keyword"));
 
     // describe the main window
@@ -43,6 +47,8 @@ fn main() {
         .delegate(Delegate)
         .launch(initial_state)
         .expect("Failed to launch application");
+
+    Ok(())
 }
 
 fn build_root_widget() -> impl Widget<AppState> {

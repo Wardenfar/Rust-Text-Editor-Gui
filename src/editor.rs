@@ -1,15 +1,19 @@
 use std::cmp::{max, min};
 use std::fs::File;
 use std::io::Cursor;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use druid::kurbo::Line;
 use druid::piet::*;
 use druid::*;
 use itertools::Itertools;
+use lsp_types::Url;
 use ropey::RopeSlice;
 
 use crate::buffer::{Action, Buffer, Movement};
 use crate::highlight::{Highlight, Region, TreeSitterHighlight};
+use crate::lsp::{LspClient, LspInput};
 use crate::theme::Style;
 use crate::{AppState, FontFamily, FontWeight, THEME};
 
@@ -18,11 +22,14 @@ pub struct TextEditor {
     layouts: Vec<D2DTextLayout>,
     regions: Vec<Region>,
     highlight: TreeSitterHighlight,
+    lsp_client: Arc<LspClient>,
 }
 
 impl TextEditor {
     pub fn new() -> Self {
         let buffer = Buffer::from_reader(Cursor::new("no file opened"));
+
+        let lsp_client = LspClient::new("pylsp".into()).unwrap();
 
         let highlight = TreeSitterHighlight::new();
         let mut editor = Self {
@@ -30,14 +37,30 @@ impl TextEditor {
             layouts: vec![],
             regions: vec![],
             highlight,
+            lsp_client: Arc::new(lsp_client),
         };
         editor.calculate_highlight();
         editor
     }
 
     pub fn read_file(&mut self, path: &String) {
-        self.buffer = Buffer::from_reader(File::open(path).unwrap());
-        self.calculate_highlight()
+        let path = PathBuf::from(path);
+        let abs = path.canonicalize().unwrap();
+
+        let url = Url::parse(&format!("file://localhost/{}", abs.to_str().unwrap())).unwrap();
+
+        {
+            let lsp_client = self.lsp_client.clone();
+            self.buffer =
+                Buffer::from_reader_lsp(File::open(path).unwrap(), url.clone(), lsp_client);
+        }
+
+        self.calculate_highlight();
+
+        self.lsp_client.input_channel.send(LspInput::OpenFile {
+            url,
+            content: self.buffer.text().into(),
+        });
     }
 
     pub fn calculate_highlight(&mut self) {
