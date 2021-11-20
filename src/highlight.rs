@@ -5,10 +5,8 @@ use tree_sitter::{Language, Parser, Query, QueryCursor};
 
 extern "C" {
     fn tree_sitter_json() -> Language;
-}
-
-extern "C" {
     fn tree_sitter_python() -> Language;
+    fn tree_sitter_rust() -> Language;
 }
 
 fn json_lang() -> Parser {
@@ -21,6 +19,13 @@ fn json_lang() -> Parser {
 fn python_lang() -> Parser {
     let mut parser = Parser::new();
     let language = unsafe { tree_sitter_python() };
+    parser.set_language(language).unwrap();
+    parser
+}
+
+fn rust_lang() -> Parser {
+    let mut parser = Parser::new();
+    let language = unsafe { tree_sitter_rust() };
     parser.set_language(language).unwrap();
     parser
 }
@@ -44,10 +49,10 @@ pub struct Region {
 
 impl TreeSitterHighlight {
     pub fn new() -> Self {
-        let parser = python_lang();
+        let parser = rust_lang();
         let query = Query::new(
             parser.language().unwrap(),
-            include_str!("../runtime/queries/python/highlights.scm"),
+            include_str!("../runtime/queries/rust/highlights.scm"),
         )
         .unwrap();
         Self { parser, query }

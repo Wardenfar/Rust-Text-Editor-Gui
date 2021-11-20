@@ -1,15 +1,20 @@
 extern crate druid;
 
+use std::borrow::BorrowMut;
 use std::ops::Sub;
+use std::sync::Mutex;
 
 use druid::widget::{Flex, Label, Padding, Painter};
 use druid::*;
 
 use crate::editor::TextEditor;
+use crate::fs::{FileSystem, LocalFs, LocalPath};
+use crate::lsp::LspSystem;
 use crate::theme::Theme;
 
 mod buffer;
 mod editor;
+mod fs;
 mod highlight;
 mod lsp;
 mod theme;
@@ -21,11 +26,14 @@ pub const EDITOR_FONT: Key<FontDescriptor> = Key::new("editor.font");
 
 #[derive(Clone, Data, Lens)]
 struct AppState {
-    file_path: Option<String>,
+    root_path: LocalPath,
+    file_path: Option<LocalPath>,
 }
 
 lazy_static::lazy_static! {
     pub static ref THEME: Theme = toml::from_str(include_str!("../runtime/themes/gruvbox.toml")).unwrap();
+    pub static ref FS: LocalFs = LocalFs::default();
+    pub static ref LSP: Mutex<LspSystem> = Mutex::new(LspSystem::default());
 }
 
 #[tokio::main]
@@ -37,9 +45,12 @@ async fn main() -> anyhow::Result<()> {
         .title(WINDOW_TITLE)
         .window_size((600.0, 450.0));
 
+    let root = FS.path("./data/example");
+
     // create the initial app state
     let initial_state = AppState {
-        file_path: Some("./data/file.py".into()),
+        root_path: root,
+        file_path: Some(FS.path("./data/example/src/main.rs")),
     };
 
     // start the application
@@ -134,7 +145,9 @@ impl AppDelegate<AppState> for Delegate {
         _env: &Env,
     ) -> Handled {
         if let Some(file_info) = cmd.get(commands::OPEN_FILE) {
-            data.file_path = file_info.path().to_str().map(|s| s.to_string());
+            if let Some(path) = file_info.path().to_str() {
+                data.file_path = Some(FS.path(path));
+            }
             Handled::Yes
         } else {
             Handled::No

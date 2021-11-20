@@ -2,21 +2,36 @@ use std::cmp::min;
 use std::io::Read;
 use std::sync::atomic::{AtomicI32, Ordering};
 
-use lsp_types::{Position, Url};
+use lsp_types::{Position, Range, Url};
 use ropey::Rope;
 
-use crate::lsp::{LspCompletion, LspInput};
+use crate::lsp::{LspCompletion, LspInput, LspLang};
+
+pub enum BufferSource {
+    Text,
+    File { uri: Url },
+}
 
 pub struct Buffer {
+    pub(crate) source: BufferSource,
     rope: Rope,
     cursor: usize,
     version: AtomicI32,
-    pub lsp_data: Option<LspData>,
+    pub completions: Vec<LspCompletion>,
 }
 
-pub struct LspData {
-    pub url: Url,
-    pub completions: Vec<LspCompletion>,
+impl Buffer {
+    pub fn position_to_index(&self, pos: Position) -> usize {
+        let line = self.line_bounds(pos.line as usize);
+        line.0 + pos.character as usize
+    }
+
+    pub fn range_to_bounds(&self, range: &Range) -> (usize, usize) {
+        (
+            self.position_to_index(range.start),
+            self.position_to_index(range.end),
+        )
+    }
 }
 
 pub enum Movement {
@@ -33,24 +48,13 @@ pub enum Action {
 }
 
 impl Buffer {
-    pub fn from_reader<R: Read>(reader: R) -> Self {
+    pub fn from_reader<R: Read>(reader: R, src: BufferSource) -> Self {
         Self {
             rope: Rope::from_reader(reader).unwrap(),
             cursor: 0,
             version: Default::default(),
-            lsp_data: None,
-        }
-    }
-
-    pub fn from_reader_lsp<R: Read>(reader: R, url: Url) -> Self {
-        Self {
-            rope: Rope::from_reader(reader).unwrap(),
-            cursor: 0,
-            version: Default::default(),
-            lsp_data: Some(LspData {
-                url,
-                completions: vec![],
-            }),
+            completions: vec![],
+            source: src,
         }
     }
 
@@ -144,20 +148,7 @@ impl Buffer {
 
         self.cursor = min(new, max);
 
-        if let Some(lsp_data) = &mut self.lsp_data {
-            lsp_data.completions = vec![]
-        }
-
-        // if let Some(data) = &self.lsp_data {
-        //     data.lsp_client
-        //         .deref()
-        //         .input_channel
-        //         .send(LspInput::RequestCompletion {
-        //             url: data.url.clone(),
-        //             row: self.row() as u32,
-        //             col: self.col() as u32,
-        //         });
-        // }
+        self.completions = vec![];
 
         false
     }
@@ -199,15 +190,7 @@ impl Buffer {
 
         self.rope.remove(start..end);
 
-        if let Some(data) = &self.lsp_data {
-            Some(LspInput::Edit {
-                url: data.url.clone(),
-                version: self.version.fetch_add(1, Ordering::SeqCst),
-                text: self.text().to_string(),
-            })
-        } else {
-            None
-        }
+        self.lsp_edit()
     }
 
     pub fn lsp_pos(&self, cur: usize) -> Position {
@@ -227,9 +210,13 @@ impl Buffer {
         // let start_pos = self.lsp_pos(start);
         // let end_pos = self.lsp_pos(start + chars.chars().count());
 
-        if let Some(data) = &self.lsp_data {
+        self.lsp_edit()
+    }
+
+    fn lsp_edit(&mut self) -> Option<LspInput> {
+        if let BufferSource::File { uri } = &self.source {
             Some(LspInput::Edit {
-                url: data.url.clone(),
+                uri: uri.clone(),
                 version: self.version.fetch_add(1, Ordering::SeqCst),
                 text: self.text().to_string(),
             })
@@ -260,11 +247,11 @@ impl Buffer {
 mod tests {
     use std::io::Cursor;
 
-    use crate::buffer::{Buffer, Movement};
+    use crate::buffer::{Buffer, BufferSource, Movement};
 
     #[test]
     fn edit() {
-        let mut buf = Buffer::from_reader(Cursor::new("test"));
+        let mut buf = Buffer::from_reader(Cursor::new("test"), BufferSource::Text);
         buf.insert(1, "yay");
         assert_eq!(buf.text(), "tyayest");
         buf.remove_chars(1, 5);
@@ -276,7 +263,7 @@ mod tests {
     #[test]
     fn bounds_3() {
         let input = "{\na}";
-        let buf = Buffer::from_reader(Cursor::new(input));
+        let buf = Buffer::from_reader(Cursor::new(input), BufferSource::Text);
         assert_eq!(buf.line_bounds(0), (0, 1));
         assert_eq!(buf.line_bounds(1), (2, 4));
     }
@@ -293,7 +280,7 @@ c
         .trim()
         .to_string();
 
-        let buf = Buffer::from_reader(Cursor::new(str));
+        let buf = Buffer::from_reader(Cursor::new(str), BufferSource::Text);
         let b = buf.line_bounds(0);
         assert_eq!(buf.rope.slice(b.0..b.1).as_str().unwrap(), "a");
         let b = buf.line_bounds(1);
@@ -317,7 +304,7 @@ c
         .trim()
         .to_string();
 
-        let buf = Buffer::from_reader(Cursor::new(str));
+        let buf = Buffer::from_reader(Cursor::new(str), BufferSource::Text);
         let b = buf.line_bounds(0);
         assert_eq!(buf.rope.slice(b.0..b.1).as_str().unwrap(), "{");
         let b = buf.line_bounds(1);
@@ -344,7 +331,7 @@ xyzefv
         .trim()
         .to_string();
 
-        let mut b = Buffer::from_reader(Cursor::new(str));
+        let mut b = Buffer::from_reader(Cursor::new(str), BufferSource::Text);
         assert_eq!(b.cursor(), 0);
         b.move_cursor(Movement::Right);
         assert_eq!(b.cursor(), 1);

@@ -11,25 +11,29 @@ use itertools::Itertools;
 use lsp_types::Url;
 use ropey::RopeSlice;
 
-use crate::buffer::{Action, Buffer, Movement};
+use crate::buffer::{Action, Buffer, BufferSource, Movement};
+use crate::fs::Path;
 use crate::highlight::{Highlight, Region, TreeSitterHighlight};
-use crate::lsp::{LspClient, LspInput, LspOutput};
+use crate::lsp::{CompletionData, LspClient, LspCompletion, LspInput, LspLang, LspOutput};
 use crate::theme::Style;
-use crate::{AppState, FontFamily, FontWeight, THEME};
+use crate::{AppState, FontFamily, FontWeight, LocalPath, LSP, THEME};
 
 pub struct TextEditor {
     buffer: Buffer,
     layouts: Vec<D2DTextLayout>,
     regions: Vec<Region>,
     highlight: TreeSitterHighlight,
-    lsp_client: LspClient,
 }
 
 impl TextEditor {
-    pub fn do_action(&mut self, action: Action) -> bool {
+    fn do_action(&mut self, action: Action, data: &mut AppState) -> bool {
         let lsp_input = self.buffer.do_action(action);
         if let Some(lsp_input) = lsp_input {
-            self.lsp_client.input_channel.send(lsp_input).unwrap();
+            let mut lsp = LSP.lock().unwrap();
+            lsp.get(data.root_path.uri(), LspLang::Rust)
+                .input_channel
+                .send(lsp_input)
+                .unwrap();
         }
         true
     }
@@ -37,9 +41,7 @@ impl TextEditor {
 
 impl TextEditor {
     pub fn new() -> Self {
-        let buffer = Buffer::from_reader(Cursor::new("no file opened"));
-
-        let lsp_client = LspClient::new("pylsp".into()).unwrap();
+        let buffer = Buffer::from_reader(Cursor::new("no file opened"), BufferSource::Text);
 
         let highlight = TreeSitterHighlight::new();
         let mut editor = Self {
@@ -47,26 +49,23 @@ impl TextEditor {
             layouts: vec![],
             regions: vec![],
             highlight,
-            lsp_client,
         };
         editor.calculate_highlight();
         editor
     }
 
-    pub fn read_file(&mut self, path: &String) {
-        let path = PathBuf::from(path);
-        let abs = path.canonicalize().unwrap();
+    pub fn read_file(&mut self, root_path: Url, path: &LocalPath) {
+        let uri = path.uri();
 
-        let url = Url::parse(&format!("file://localhost/{}", abs.to_str().unwrap())).unwrap();
-
-        self.buffer = Buffer::from_reader_lsp(File::open(path).unwrap(), url.clone());
+        self.buffer = Buffer::from_reader(path.reader(), BufferSource::File { uri: uri.clone() });
 
         self.calculate_highlight();
 
-        self.lsp_client
+        let mut lsp = LSP.lock().unwrap();
+        lsp.get(root_path, LspLang::Rust)
             .input_channel
             .send(LspInput::OpenFile {
-                url,
+                uri,
                 content: self.buffer.text().into(),
             })
             .context("lsp: open file")
@@ -156,16 +155,17 @@ impl TextEditor {
 }
 
 impl Widget<AppState> for TextEditor {
-    fn event(&mut self, ctx: &mut EventCtx, event: &Event, _data: &mut AppState, _env: &Env) {
+    fn event(&mut self, ctx: &mut EventCtx, event: &Event, data: &mut AppState, _env: &Env) {
         match event {
             Event::KeyDown(key) => {
                 let dirty = match &key.code {
                     Code::Space if key.mods.ctrl() => {
-                        if let Some(lsp_data) = &self.buffer.lsp_data {
-                            self.lsp_client
+                        if let BufferSource::File { uri } = &self.buffer.source {
+                            let mut lsp = LSP.lock().unwrap();
+                            lsp.get(data.root_path.uri(), LspLang::Rust)
                                 .input_channel
                                 .send(LspInput::RequestCompletion {
-                                    url: lsp_data.url.clone(),
+                                    uri: uri.clone(),
                                     row: self.buffer.row() as u32,
                                     col: self.buffer.col() as u32,
                                 })
@@ -176,35 +176,18 @@ impl Widget<AppState> for TextEditor {
                     }
                     Code::F1 => {
                         let cursor = self.buffer.cursor();
-                        let compl = if let Some(lsp_data) = &self.buffer.lsp_data {
-                            if let Some(c) = lsp_data.completions.get(0) {
-                                Some(c.clone())
-                            } else {
-                                None
-                            }
-                        } else {
-                            None
-                        };
-                        if let Some(c) = compl {
-                            self.buffer.insert(cursor, &c.insert_text);
-                            true
-                        } else {
-                            false
-                        }
-                    }
-                    Code::F2 => {
-                        let cursor = self.buffer.cursor();
-                        let compl = if let Some(lsp_data) = &self.buffer.lsp_data {
-                            if let Some(c) = lsp_data.completions.get(1) {
-                                Some(c.clone())
-                            } else {
-                                None
-                            }
-                        } else {
-                            None
-                        };
-                        if let Some(c) = compl {
-                            self.buffer.insert(cursor, &c.insert_text);
+                        let c = self.buffer.completions.get(0).map(|c| c.clone());
+                        if let Some(c) = c {
+                            match c.data {
+                                CompletionData::Simple(text) => {
+                                    self.buffer.insert(cursor, &text);
+                                }
+                                CompletionData::Edit { range, new_text } => {
+                                    let bounds = self.buffer.range_to_bounds(&range);
+                                    self.buffer.remove_chars(bounds.0, bounds.1);
+                                    self.buffer.insert(bounds.0, &new_text);
+                                }
+                            };
                             true
                         } else {
                             false
@@ -218,9 +201,9 @@ impl Widget<AppState> for TextEditor {
                     Code::ArrowLeft => self.buffer.move_cursor(Movement::Left),
                     Code::ArrowRight => self.buffer.move_cursor(Movement::Right),
                     Code::ArrowUp => self.buffer.move_cursor(Movement::Up),
-                    Code::Backspace => self.do_action(Action::Backspace),
-                    Code::Delete => self.do_action(Action::Delete),
-                    Code::Enter => self.do_action(Action::Insert("\n".into())),
+                    Code::Backspace => self.do_action(Action::Backspace, data),
+                    Code::Delete => self.do_action(Action::Delete, data),
+                    Code::Enter => self.do_action(Action::Insert("\n".into()), data),
                     _ => {
                         let code = key.key.legacy_charcode();
                         if code == 0 {
@@ -228,8 +211,7 @@ impl Widget<AppState> for TextEditor {
                         } else {
                             let char = char::from_u32(code);
                             if let Some(char) = char {
-                                self.buffer.do_action(Action::Insert(String::from(char)));
-                                true
+                                self.do_action(Action::Insert(String::from(char)), data)
                             } else {
                                 false
                             }
@@ -245,13 +227,17 @@ impl Widget<AppState> for TextEditor {
             _ => {}
         }
 
-        if let Ok(data) = self.lsp_client.output_channel.try_recv() {
+        let mut lsp = LSP.lock().unwrap();
+        if let Ok(data) = lsp
+            .get(data.root_path.uri(), LspLang::Rust)
+            .output_channel
+            .try_recv()
+        {
+            println!("{:?}", &data);
             match data {
                 LspOutput::Completion(completions) => {
-                    if let Some(lsp_data) = &mut self.buffer.lsp_data {
-                        lsp_data.completions = completions;
-                        ctx.request_paint();
-                    }
+                    self.buffer.completions = completions;
+                    ctx.request_paint();
                 }
             }
         }
@@ -267,7 +253,7 @@ impl Widget<AppState> for TextEditor {
         match event {
             LifeCycle::WidgetAdded => {
                 if let Some(path) = &data.file_path {
-                    self.read_file(path);
+                    self.read_file(data.root_path.uri(), path);
                 }
             }
             _ => {}
@@ -277,7 +263,7 @@ impl Widget<AppState> for TextEditor {
     fn update(&mut self, ctx: &mut UpdateCtx, old_data: &AppState, data: &AppState, _env: &Env) {
         if old_data.file_path != data.file_path {
             if let Some(path) = &data.file_path {
-                self.read_file(path);
+                self.read_file(data.root_path.uri(), path);
                 ctx.request_paint();
             }
         }
@@ -368,20 +354,18 @@ impl Widget<AppState> for TextEditor {
 
         let cursor_point = cursor_point.unwrap_or((0.0, 0.0));
 
-        if let Some(lsp_data) = &self.buffer.lsp_data {
-            let text = lsp_data.completions.iter().map(|c| &c.label).join("\n");
-            let layout = text_layout(ctx, env, &text, &Style::default())
-                .build()
-                .unwrap();
-            let rect = Rect::new(
-                cursor_point.0,
-                cursor_point.1,
-                cursor_point.0 + layout.size().width,
-                cursor_point.1 + layout.size().height,
-            );
-            ctx.fill(rect, &Color::BLACK);
-            ctx.draw_text(&layout, Point::new(cursor_point.0, cursor_point.1))
-        }
+        let text = self.buffer.completions.iter().map(|c| &c.label).join("\n");
+        let layout = text_layout(ctx, env, &text, &Style::default())
+            .build()
+            .unwrap();
+        let rect = Rect::new(
+            cursor_point.0,
+            cursor_point.1,
+            cursor_point.0 + layout.size().width,
+            cursor_point.1 + layout.size().height,
+        );
+        ctx.fill(rect, &Color::BLACK);
+        ctx.draw_text(&layout, Point::new(cursor_point.0, cursor_point.1));
 
         ctx.restore().unwrap()
     }
