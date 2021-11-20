@@ -1,5 +1,4 @@
 use std::fs::{File as StdFile, File};
-use std::io::Read;
 use std::path::PathBuf;
 
 use druid::Data;

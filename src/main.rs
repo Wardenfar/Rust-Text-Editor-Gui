@@ -1,6 +1,5 @@
 extern crate druid;
 
-use std::borrow::BorrowMut;
 use std::ops::Sub;
 use std::sync::Mutex;
 
@@ -31,7 +30,7 @@ struct AppState {
 }
 
 lazy_static::lazy_static! {
-    pub static ref THEME: Theme = toml::from_str(include_str!("../runtime/themes/gruvbox.toml")).unwrap();
+    pub static ref THEME: Theme = toml::from_str(include_str!("../runtime/themes/default.toml")).unwrap();
     pub static ref FS: LocalFs = LocalFs::default();
     pub static ref LSP: Mutex<LspSystem> = Mutex::new(LspSystem::default());
 }

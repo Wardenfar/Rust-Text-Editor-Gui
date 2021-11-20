@@ -1,11 +1,13 @@
+use itertools::Itertools;
 use std::cmp::min;
 use std::io::Read;
+use std::ops::RangeBounds;
 use std::sync::atomic::{AtomicI32, Ordering};
 
 use lsp_types::{Position, Range, Url};
 use ropey::Rope;
 
-use crate::lsp::{LspCompletion, LspInput, LspLang};
+use crate::lsp::{CompletionData, LspCompletion, LspInput};
 
 pub enum BufferSource {
     Text,
@@ -15,23 +17,9 @@ pub enum BufferSource {
 pub struct Buffer {
     pub(crate) source: BufferSource,
     rope: Rope,
-    cursor: usize,
+    cursor: Index,
     version: AtomicI32,
     pub completions: Vec<LspCompletion>,
-}
-
-impl Buffer {
-    pub fn position_to_index(&self, pos: Position) -> usize {
-        let line = self.line_bounds(pos.line as usize);
-        line.0 + pos.character as usize
-    }
-
-    pub fn range_to_bounds(&self, range: &Range) -> (usize, usize) {
-        (
-            self.position_to_index(range.start),
-            self.position_to_index(range.end),
-        )
-    }
 }
 
 pub enum Movement {
@@ -47,7 +35,88 @@ pub enum Action {
     Delete,
 }
 
+pub type Index = usize;
+pub type Bounds = (Index, Index);
+
+pub trait FromWithBuffer<T> {
+    fn from_with_buf(o: T, buffer: &Buffer) -> Self;
+}
+
+pub trait IntoWithBuffer<T> {
+    fn into_with_buf(self, buffer: &Buffer) -> T;
+}
+
+impl<F, I> IntoWithBuffer<F> for I
+where
+    F: FromWithBuffer<I>,
+{
+    fn into_with_buf(self, buffer: &Buffer) -> F {
+        F::from_with_buf(self, buffer)
+    }
+}
+
+impl FromWithBuffer<&Range> for Bounds {
+    fn from_with_buf(range: &Range, buffer: &Buffer) -> Self {
+        (
+            Index::from_with_buf(&range.start, buffer),
+            Index::from_with_buf(&range.end, buffer),
+        )
+    }
+}
+
+impl FromWithBuffer<&Position> for Index {
+    fn from_with_buf(pos: &Position, buffer: &Buffer) -> Self {
+        let line = buffer.line_bounds(pos.line as usize);
+        line.0 + pos.character as usize
+    }
+}
+
+impl<T> FromWithBuffer<T> for T {
+    fn from_with_buf(o: T, _: &Buffer) -> Self {
+        o
+    }
+}
+
 impl Buffer {
+    pub fn sorted_completions(&self) -> Vec<&LspCompletion> {
+        let cursor_idx = self.cursor();
+        let before_cursor_idx = cursor_idx.saturating_sub(20);
+        let window = self.text_slice(before_cursor_idx..cursor_idx).unwrap_or("");
+        let win_size = window.len();
+
+        let completions = &self.completions;
+        completions
+            .iter()
+            .sorted_by_key(|c| match &c.data {
+                CompletionData::Simple(text) => {
+                    let chars_len = text.chars().count();
+                    for nb in (0..chars_len).rev() {
+                        if text.ends_with(&window[(win_size.saturating_sub(nb))..]) {
+                            return nb;
+                        }
+                    }
+                    0
+                }
+                CompletionData::Edit { range, new_text } => {
+                    let bounds: Bounds = range.into_with_buf(&self);
+
+                    if let Some(buf_text) = self.text_slice(bounds.0..bounds.1) {
+                        if new_text.starts_with(buf_text) {
+                            3
+                        } else if new_text.contains(buf_text) {
+                            2
+                        } else {
+                            1
+                        }
+                    } else {
+                        0
+                    }
+                }
+            })
+            .rev()
+            .collect()
+    }
+
     pub fn from_reader<R: Read>(reader: R, src: BufferSource) -> Self {
         Self {
             rope: Rope::from_reader(reader).unwrap(),
@@ -58,7 +127,7 @@ impl Buffer {
         }
     }
 
-    pub fn line_bounds(&self, line: usize) -> (usize, usize) {
+    pub fn line_bounds(&self, line: Index) -> Bounds {
         let start = if line > self.rope.len_lines() {
             self.rope.len_chars()
         } else {
@@ -93,19 +162,20 @@ impl Buffer {
         &self.rope
     }
 
-    pub fn col(&self) -> usize {
+    pub fn col(&self) -> Index {
         self.col_at(self.cursor())
     }
 
-    pub fn row(&self) -> usize {
+    pub fn row(&self) -> Index {
         self.row_at(self.cursor())
     }
 
-    pub fn row_at(&self, cur: usize) -> usize {
-        self.rope.char_to_line(cur)
+    pub fn row_at<I: IntoWithBuffer<Index>>(&self, cur: I) -> Index {
+        self.rope.char_to_line(cur.into_with_buf(self))
     }
 
-    pub fn col_at(&self, cur: usize) -> usize {
+    pub fn col_at<I: IntoWithBuffer<Index>>(&self, cur: I) -> Index {
+        let cur = cur.into_with_buf(self);
         let bounds = self.line_bounds(self.row_at(cur));
         cur - bounds.0
     }
@@ -153,7 +223,12 @@ impl Buffer {
         false
     }
 
-    pub fn remove_chars(&mut self, mut start: usize, mut end: usize) -> Option<LspInput> {
+    pub fn remove_chars<I: IntoWithBuffer<Bounds>>(&mut self, bounds: I) -> Option<LspInput> {
+        let bounds = bounds.into_with_buf(self);
+
+        let mut start = bounds.0;
+        let mut end = bounds.1;
+
         if start > self.rope.len_chars() {
             start = self.rope.len_chars()
         }
@@ -193,14 +268,8 @@ impl Buffer {
         self.lsp_edit()
     }
 
-    pub fn lsp_pos(&self, cur: usize) -> Position {
-        Position {
-            line: self.row_at(cur) as u32,
-            character: self.col_at(cur) as u32,
-        }
-    }
-
-    pub fn insert(&mut self, start: usize, chars: &str) -> Option<LspInput> {
+    pub fn insert<I: IntoWithBuffer<Index>>(&mut self, start: I, chars: &str) -> Option<LspInput> {
+        let start = start.into_with_buf(self);
         let curr = self.cursor();
         if curr >= start {
             self.cursor = curr + chars.chars().count()
@@ -229,17 +298,21 @@ impl Buffer {
         let curr = self.cursor();
         match a {
             Action::Insert(chars) => self.insert(curr, chars.as_str()),
-            Action::Backspace => self.remove_chars(curr.saturating_sub(1), curr),
-            Action::Delete => self.remove_chars(curr, curr.saturating_add(1)),
+            Action::Backspace => self.remove_chars((curr.saturating_sub(1), curr)),
+            Action::Delete => self.remove_chars((curr, curr.saturating_add(1))),
         }
     }
 
-    pub fn cursor(&self) -> usize {
+    pub fn cursor(&self) -> Index {
         self.cursor
     }
 
     pub fn text(&self) -> &str {
         self.rope.slice(..).as_str().unwrap()
+    }
+
+    pub fn text_slice<R: RangeBounds<usize>>(&self, range: R) -> Option<&str> {
+        self.rope.slice(range).as_str()
     }
 }
 
@@ -254,7 +327,7 @@ mod tests {
         let mut buf = Buffer::from_reader(Cursor::new("test"), BufferSource::Text);
         buf.insert(1, "yay");
         assert_eq!(buf.text(), "tyayest");
-        buf.remove_chars(1, 5);
+        buf.remove_chars((1, 5));
         assert_eq!(buf.text(), "tst");
         buf.insert(3, "\nnew line");
         assert_eq!(2, buf.rope().len_lines())

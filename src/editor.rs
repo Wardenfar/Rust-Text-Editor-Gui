@@ -1,20 +1,19 @@
 use anyhow::Context;
 use std::cmp::{max, min};
-use std::fs::File;
 use std::io::Cursor;
-use std::path::PathBuf;
 
 use druid::kurbo::Line;
 use druid::piet::*;
+use druid::platform_menus::win::file::new;
 use druid::*;
 use itertools::Itertools;
 use lsp_types::Url;
 use ropey::RopeSlice;
 
-use crate::buffer::{Action, Buffer, BufferSource, Movement};
+use crate::buffer::{Action, Bounds, Buffer, BufferSource, IntoWithBuffer, Movement};
 use crate::fs::Path;
 use crate::highlight::{Highlight, Region, TreeSitterHighlight};
-use crate::lsp::{CompletionData, LspClient, LspCompletion, LspInput, LspLang, LspOutput};
+use crate::lsp::{lsp_send, lsp_try_recv, CompletionData, LspInput, LspLang, LspOutput};
 use crate::theme::Style;
 use crate::{AppState, FontFamily, FontWeight, LocalPath, LSP, THEME};
 
@@ -29,11 +28,7 @@ impl TextEditor {
     fn do_action(&mut self, action: Action, data: &mut AppState) -> bool {
         let lsp_input = self.buffer.do_action(action);
         if let Some(lsp_input) = lsp_input {
-            let mut lsp = LSP.lock().unwrap();
-            lsp.get(data.root_path.uri(), LspLang::Rust)
-                .input_channel
-                .send(lsp_input)
-                .unwrap();
+            lsp_send(data.root_path.uri(), LspLang::Rust, lsp_input);
         }
         true
     }
@@ -61,15 +56,14 @@ impl TextEditor {
 
         self.calculate_highlight();
 
-        let mut lsp = LSP.lock().unwrap();
-        lsp.get(root_path, LspLang::Rust)
-            .input_channel
-            .send(LspInput::OpenFile {
+        lsp_send(
+            root_path,
+            LspLang::Rust,
+            LspInput::OpenFile {
                 uri,
                 content: self.buffer.text().into(),
-            })
-            .context("lsp: open file")
-            .unwrap();
+            },
+        );
     }
 
     pub fn calculate_highlight(&mut self) {
@@ -82,22 +76,21 @@ impl TextEditor {
     fn build_parts<'a>(
         ctx: &mut PaintCtx,
         env: &Env,
-        global_start: usize,
+        global_start_char: usize,
         slice: RopeSlice<'a>,
         cuts: &Vec<Cut>,
     ) -> Vec<TextPart<'a>> {
         let mut parts = Vec::new();
 
         for cut in cuts {
-            let start = cut.start;
-            let end = cut.end;
+            let start_byte = cut.start_byte;
+            let end_byte = cut.end_byte;
 
-            let mut builder = text_layout(
-                ctx,
-                env,
-                slice.slice(start..end).as_str().unwrap(),
-                &cut.style,
-            );
+            let start_char = slice.byte_to_char(start_byte);
+            let end_char = slice.byte_to_char(end_byte);
+            let line_slice = slice.slice(start_char..end_char);
+
+            let mut builder = text_layout(ctx, env, line_slice.as_str().unwrap(), &cut.style);
 
             let style = &cut.style;
 
@@ -117,37 +110,37 @@ impl TextEditor {
 
             parts.push(TextPart {
                 layout,
-                slice: slice.slice(start..end),
-                start_char: global_start + cut.start,
-                end_char: global_start + cut.end,
+                slice: line_slice,
+                start_char: global_start_char + start_char,
+                end_char: global_start_char + end_char,
                 style: style.clone(),
             });
         }
         parts
     }
 
-    fn find_cuts(line_size: usize, regions: &Vec<Region>) -> Vec<Cut> {
+    fn find_cuts(line_bytes_len: usize, regions: &Vec<Region>) -> Vec<Cut> {
         let mut cuts = Vec::new();
 
         let mut last_index = 0;
         for r in regions.iter().sorted_by_key(|r| r.start_byte) {
             if r.start_byte > last_index {
                 cuts.push(Cut {
-                    start: last_index,
-                    end: r.start_byte,
+                    start_byte: last_index,
+                    end_byte: r.start_byte,
                     style: Style::default(),
                 });
             }
             cuts.push(Cut {
-                start: r.start_byte,
-                end: r.end_byte,
+                start_byte: r.start_byte,
+                end_byte: r.end_byte,
                 style: r.style.clone(),
             });
             last_index = r.end_byte;
         }
         cuts.push(Cut {
-            start: last_index,
-            end: line_size,
+            start_byte: last_index,
+            end_byte: line_bytes_len,
             style: Style::default(),
         });
         cuts
@@ -161,31 +154,33 @@ impl Widget<AppState> for TextEditor {
                 let dirty = match &key.code {
                     Code::Space if key.mods.ctrl() => {
                         if let BufferSource::File { uri } = &self.buffer.source {
-                            let mut lsp = LSP.lock().unwrap();
-                            lsp.get(data.root_path.uri(), LspLang::Rust)
-                                .input_channel
-                                .send(LspInput::RequestCompletion {
+                            lsp_send(
+                                data.root_path.uri(),
+                                LspLang::Rust,
+                                LspInput::RequestCompletion {
                                     uri: uri.clone(),
                                     row: self.buffer.row() as u32,
                                     col: self.buffer.col() as u32,
-                                })
-                                .context("lsp request completion")
-                                .unwrap();
+                                },
+                            );
                         }
                         false
                     }
                     Code::F1 => {
                         let cursor = self.buffer.cursor();
-                        let c = self.buffer.completions.get(0).map(|c| c.clone());
+                        let c = self
+                            .buffer
+                            .sorted_completions()
+                            .first()
+                            .map(|c| (*c).clone());
                         if let Some(c) = c {
-                            match c.data {
+                            match &c.data {
                                 CompletionData::Simple(text) => {
                                     self.buffer.insert(cursor, &text);
                                 }
                                 CompletionData::Edit { range, new_text } => {
-                                    let bounds = self.buffer.range_to_bounds(&range);
-                                    self.buffer.remove_chars(bounds.0, bounds.1);
-                                    self.buffer.insert(bounds.0, &new_text);
+                                    self.buffer.remove_chars(range);
+                                    self.buffer.insert(&range.start, &new_text);
                                 }
                             };
                             true
@@ -227,13 +222,7 @@ impl Widget<AppState> for TextEditor {
             _ => {}
         }
 
-        let mut lsp = LSP.lock().unwrap();
-        if let Ok(data) = lsp
-            .get(data.root_path.uri(), LspLang::Rust)
-            .output_channel
-            .try_recv()
-        {
-            println!("{:?}", &data);
+        if let Ok(data) = lsp_try_recv(data.root_path.uri(), LspLang::Rust) {
             match data {
                 LspOutput::Completion(completions) => {
                     self.buffer.completions = completions;
@@ -295,7 +284,6 @@ impl Widget<AppState> for TextEditor {
         let mut y = 0.0;
         for line in 0..rope.len_lines() {
             let bounds = self.buffer.line_bounds(line);
-            let line_size = bounds.1 - bounds.0;
             let slice = rope.slice(bounds.0..bounds.1);
 
             let byte_start = rope.char_to_byte(bounds.0);
@@ -308,12 +296,10 @@ impl Widget<AppState> for TextEditor {
                     let start = max(byte_start, r.start_byte);
                     let end = min(byte_end, r.end_byte);
                     if start < end {
-                        let start_char = rope.byte_to_char(start - byte_start);
-                        let end_char = rope.byte_to_char(end - byte_start);
                         Some(Region {
                             index: r.index,
-                            start_byte: start_char,
-                            end_byte: end_char,
+                            start_byte: start - byte_start,
+                            end_byte: end - byte_start,
                             style: r.style.clone(),
                         })
                     } else {
@@ -322,7 +308,7 @@ impl Widget<AppState> for TextEditor {
                 })
                 .collect::<Vec<_>>();
 
-            let cuts = Self::find_cuts(line_size, &regions);
+            let cuts = Self::find_cuts(byte_end - byte_start, &regions);
             let parts = Self::build_parts(ctx, env, bounds.0, slice, &cuts);
 
             let max_height = parts
@@ -336,7 +322,9 @@ impl Widget<AppState> for TextEditor {
                 ctx.draw_text(&part.layout, Point::new(x, y));
 
                 if part.start_char <= cursor && cursor <= part.end_char {
-                    let hit = part.layout.hit_test_text_position(cursor - part.start_char);
+                    let char_idx = cursor - part.start_char;
+                    let byte_idx = part.slice.char_to_byte(char_idx);
+                    let hit = part.layout.hit_test_text_position(byte_idx);
                     let curr_x = x + hit.point.x;
                     let line = Line::new(
                         Point::new(curr_x, y),
@@ -354,17 +342,25 @@ impl Widget<AppState> for TextEditor {
 
         let cursor_point = cursor_point.unwrap_or((0.0, 0.0));
 
-        let text = self.buffer.completions.iter().map(|c| &c.label).join("\n");
-        let layout = text_layout(ctx, env, &text, &Style::default())
+        let text = self
+            .buffer
+            .sorted_completions()
+            .iter()
+            .take(8)
+            .map(|c| &c.label)
+            .join("\n");
+
+        let layout = text_layout(ctx, env, &text, &THEME.scope("ui.text"))
             .build()
             .unwrap();
+
         let rect = Rect::new(
             cursor_point.0,
             cursor_point.1,
             cursor_point.0 + layout.size().width,
             cursor_point.1 + layout.size().height,
         );
-        ctx.fill(rect, &Color::BLACK);
+        ctx.fill(rect, &THEME.scope("ui.popup").bg());
         ctx.draw_text(&layout, Point::new(cursor_point.0, cursor_point.1));
 
         ctx.restore().unwrap()
@@ -380,15 +376,15 @@ pub struct TextPart<'a> {
 }
 
 pub struct Cut {
-    pub start: usize,
-    pub end: usize,
+    pub start_byte: usize,
+    pub end_byte: usize,
     pub style: Style,
 }
 
 fn text_layout(ctx: &mut PaintCtx, _env: &Env, text: &str, style: &Style) -> D2DTextLayoutBuilder {
     ctx.text()
         .new_text_layout(text.to_string())
-        .text_color(Color::WHITE)
+        .text_color(style.fg())
         .font(
             FontFamily::new_unchecked(style.font_family()),
             style.font_size(),

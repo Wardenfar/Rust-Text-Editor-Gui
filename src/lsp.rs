@@ -1,21 +1,20 @@
-use std::borrow::Borrow;
 use std::collections::HashMap;
 use std::io::Write;
 use std::process;
 use std::process::Command;
 
+use crate::LSP;
 use anyhow::Context;
 use jsonrpc_core::Output;
 use lsp_types::{
-    CompletionClientCapabilities, CompletionItem, CompletionResponse, CompletionTextEdit,
-    GeneralClientCapabilities, PublishDiagnosticsClientCapabilities, Range,
+    CompletionClientCapabilities, CompletionItem, CompletionItemCapability, CompletionResponse,
+    CompletionTextEdit, GeneralClientCapabilities, PublishDiagnosticsClientCapabilities, Range,
     TextDocumentClientCapabilities, TextDocumentContentChangeEvent, TraceOption, Url,
     VersionedTextDocumentIdentifier,
 };
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::sync::mpsc;
-
-use crate::FileSystem;
+use tokio::sync::mpsc::error::TryRecvError;
 
 const ID_INIT: u64 = 0;
 const ID_COMPLETION: u64 = 1;
@@ -42,6 +41,16 @@ impl LspLang {
             }
         }
     }
+}
+
+pub fn lsp_send(root_path: Url, lang: LspLang, input: LspInput) {
+    let mut lsp = LSP.lock().unwrap();
+    lsp.get(root_path, lang).input_channel.send(input).unwrap();
+}
+
+pub fn lsp_try_recv(root_path: Url, lang: LspLang) -> Result<LspOutput, TryRecvError> {
+    let mut lsp = LSP.lock().unwrap();
+    lsp.get(root_path, lang).output_channel.try_recv()
 }
 
 #[derive(Default)]
@@ -127,7 +136,17 @@ impl LspClient {
                     synchronization: None,
                     completion: Some(CompletionClientCapabilities {
                         dynamic_registration: Some(false),
-                        completion_item: None,
+                        completion_item: Some(CompletionItemCapability {
+                            snippet_support: None,
+                            commit_characters_support: None,
+                            documentation_format: None,
+                            deprecated_support: None,
+                            preselect_support: Some(true),
+                            tag_support: None,
+                            insert_replace_support: None,
+                            resolve_support: None,
+                            insert_text_mode_support: None,
+                        }),
                         completion_item_kind: None,
                         context_support: Some(true),
                     }),
@@ -297,7 +316,6 @@ impl LspClient {
                             CompletionResponse::Array(arr) => convert_completions(arr),
                             CompletionResponse::List(list) => convert_completions(list.items),
                         };
-                        dbg!(&completions);
                         tx.send(LspOutput::Completion(completions))?;
                     }
                 }
@@ -313,6 +331,7 @@ impl LspClient {
 }
 
 fn convert_completions(mut input: Vec<CompletionItem>) -> Vec<LspCompletion> {
+    dbg!(&input);
     input
         .drain(..)
         .filter_map(|c| {
