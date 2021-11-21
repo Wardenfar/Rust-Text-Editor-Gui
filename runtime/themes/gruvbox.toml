@@ -43,7 +43,7 @@
 "ui.help" = { bg = "bg1", fg = "fg1" }
 "ui.text" = { fg = "fg1" }
 "ui.text.focus" = { fg = "fg1" }
-"ui.selection" = { bg = "bg3", modifiers = ["reversed"] }
+"ui.selection" = { bg = "bg3" }
 "ui.cursor.primary" = { modifiers = ["reversed"] }
 "ui.cursor.match" = { modifiers = ["reversed"] }
 "ui.menu" = { fg = "fg1", bg = "bg2" }

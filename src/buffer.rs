@@ -1,5 +1,5 @@
 use itertools::Itertools;
-use std::cmp::min;
+use std::cmp::{max, min};
 use std::io::Read;
 use std::ops::RangeBounds;
 use std::sync::atomic::{AtomicI32, Ordering};
@@ -17,7 +17,7 @@ pub enum BufferSource {
 pub struct Buffer {
     pub(crate) source: BufferSource,
     rope: Rope,
-    cursor: Index,
+    cursor: Cursor,
     version: AtomicI32,
     pub completions: Vec<LspCompletion>,
 }
@@ -37,6 +37,22 @@ pub enum Action {
 
 pub type Index = usize;
 pub type Bounds = (Index, Index);
+
+#[derive(Clone, Debug)]
+pub struct Cursor {
+    pub head: Index,
+    pub tail: Index,
+}
+
+impl Cursor {
+    pub fn min(&self) -> Index {
+        min(self.head, self.tail)
+    }
+
+    pub fn max(&self) -> Index {
+        max(self.head, self.tail)
+    }
+}
 
 pub trait FromWithBuffer<T> {
     fn from_with_buf(o: T, buffer: &Buffer) -> Self;
@@ -79,9 +95,9 @@ impl<T> FromWithBuffer<T> for T {
 
 impl Buffer {
     pub fn sorted_completions(&self) -> Vec<&LspCompletion> {
-        let cursor_idx = self.cursor();
+        let cursor_idx = self.cursor().head;
         let before_cursor_idx = cursor_idx.saturating_sub(20);
-        let window = self.text_slice(before_cursor_idx..cursor_idx).unwrap_or("");
+        let window = self.text_slice(before_cursor_idx..cursor_idx);
         let win_size = window.len();
 
         let completions = &self.completions;
@@ -100,16 +116,13 @@ impl Buffer {
                 CompletionData::Edit { range, new_text } => {
                     let bounds: Bounds = range.into_with_buf(&self);
 
-                    if let Some(buf_text) = self.text_slice(bounds.0..bounds.1) {
-                        if new_text.starts_with(buf_text) {
-                            3
-                        } else if new_text.contains(buf_text) {
-                            2
-                        } else {
-                            1
-                        }
+                    let buf_text = self.text_slice(bounds.0..bounds.1);
+                    if new_text.starts_with(&buf_text) {
+                        3
+                    } else if new_text.contains(&buf_text) {
+                        2
                     } else {
-                        0
+                        1
                     }
                 }
             })
@@ -120,7 +133,7 @@ impl Buffer {
     pub fn from_reader<R: Read>(reader: R, src: BufferSource) -> Self {
         Self {
             rope: Rope::from_reader(reader).unwrap(),
-            cursor: 0,
+            cursor: Cursor { head: 0, tail: 0 },
             version: Default::default(),
             completions: vec![],
             source: src,
@@ -163,11 +176,11 @@ impl Buffer {
     }
 
     pub fn col(&self) -> Index {
-        self.col_at(self.cursor())
+        self.col_at(self.cursor().head)
     }
 
     pub fn row(&self) -> Index {
-        self.row_at(self.cursor())
+        self.row_at(self.cursor().head)
     }
 
     pub fn row_at<I: IntoWithBuffer<Index>>(&self, cur: I) -> Index {
@@ -180,8 +193,9 @@ impl Buffer {
         cur - bounds.0
     }
 
-    pub fn move_cursor(&mut self, m: Movement) -> bool {
-        let cur = self.cursor;
+    pub fn move_cursor(&mut self, m: Movement, keep_selection: bool) -> bool {
+        let cur_head = self.cursor.head;
+
         let line = self.row();
 
         let prev_line = self.line_bounds(line.saturating_sub(1));
@@ -190,16 +204,16 @@ impl Buffer {
 
         let max = self.rope.len_chars();
         let new = match m {
-            Movement::Up => prev_line.0 + min(prev_line.1 - prev_line.0, cur - curr_line.0),
+            Movement::Up => prev_line.0 + min(prev_line.1 - prev_line.0, cur_head - curr_line.0),
             Movement::Down => {
                 if line >= self.rope.len_lines() - 1 {
-                    cur
+                    cur_head
                 } else {
-                    next_line.0 + min(next_line.1 - next_line.0, cur - curr_line.0)
+                    next_line.0 + min(next_line.1 - next_line.0, cur_head - curr_line.0)
                 }
             }
             Movement::Left => {
-                let next = cur.saturating_sub(1);
+                let next = cur_head.saturating_sub(1);
                 if next < curr_line.0 {
                     prev_line.1
                 } else {
@@ -207,7 +221,7 @@ impl Buffer {
                 }
             }
             Movement::Right => {
-                let next = cur.saturating_add(1);
+                let next = cur_head.saturating_add(1);
                 if next > curr_line.1 {
                     next_line.0
                 } else {
@@ -216,7 +230,11 @@ impl Buffer {
             }
         };
 
-        self.cursor = min(new, max);
+        self.cursor.head = min(new, max);
+
+        if !keep_selection {
+            self.cursor.tail = self.cursor.head;
+        }
 
         self.completions = vec![];
 
@@ -253,15 +271,19 @@ impl Buffer {
             end = self.line_bounds(end_line.saturating_add(1)).0;
         }
 
-        let curr = self.cursor();
-        if curr >= end {
-            self.cursor = curr - (end - start)
-        } else if curr >= start {
-            self.cursor = start
+        let head = self.cursor.head;
+        if head >= end {
+            self.cursor.head = head - (end - start)
+        } else if head >= start {
+            self.cursor.head = start
         }
 
-        // let start_pos = self.lsp_pos(start);
-        // let end_pos = self.lsp_pos(end);
+        let tail = self.cursor.tail;
+        if tail >= end {
+            self.cursor.tail = tail - (end - start)
+        } else if tail >= start {
+            self.cursor.tail = start
+        }
 
         self.rope.remove(start..end);
 
@@ -270,14 +292,18 @@ impl Buffer {
 
     pub fn insert<I: IntoWithBuffer<Index>>(&mut self, start: I, chars: &str) -> Option<LspInput> {
         let start = start.into_with_buf(self);
-        let curr = self.cursor();
-        if curr >= start {
-            self.cursor = curr + chars.chars().count()
-        }
-        self.rope.insert(start, chars);
 
-        // let start_pos = self.lsp_pos(start);
-        // let end_pos = self.lsp_pos(start + chars.chars().count());
+        let curr = self.cursor.head;
+        if curr >= start {
+            self.cursor.head = curr + chars.chars().count()
+        }
+
+        let curr = self.cursor.tail;
+        if curr >= start {
+            self.cursor.tail = curr + chars.chars().count()
+        }
+
+        self.rope.insert(start, chars);
 
         self.lsp_edit()
     }
@@ -295,24 +321,41 @@ impl Buffer {
     }
 
     pub fn do_action(&mut self, a: Action) -> Option<LspInput> {
-        let curr = self.cursor();
         match a {
-            Action::Insert(chars) => self.insert(curr, chars.as_str()),
-            Action::Backspace => self.remove_chars((curr.saturating_sub(1), curr)),
-            Action::Delete => self.remove_chars((curr, curr.saturating_add(1))),
+            Action::Insert(chars) => {
+                if self.cursor.head != self.cursor.tail {
+                    let bounds = (self.cursor.min(), self.cursor.max());
+                    self.remove_chars(bounds);
+                }
+                self.insert(self.cursor.head, chars.as_str())
+            }
+            Action::Backspace => {
+                if self.cursor.head != self.cursor.tail {
+                    self.remove_chars((self.cursor.min(), self.cursor.max()))
+                } else {
+                    self.remove_chars((self.cursor.head.saturating_sub(1), self.cursor.head))
+                }
+            }
+            Action::Delete => {
+                if self.cursor.head != self.cursor.tail {
+                    self.remove_chars((self.cursor.min(), self.cursor.max()))
+                } else {
+                    self.remove_chars((self.cursor.head, self.cursor.head.saturating_add(1)))
+                }
+            }
         }
     }
 
-    pub fn cursor(&self) -> Index {
-        self.cursor
+    pub fn cursor(&self) -> Cursor {
+        self.cursor.clone()
     }
 
-    pub fn text(&self) -> &str {
-        self.rope.slice(..).as_str().unwrap()
+    pub fn text(&self) -> String {
+        self.rope.chars().collect()
     }
 
-    pub fn text_slice<R: RangeBounds<usize>>(&self, range: R) -> Option<&str> {
-        self.rope.slice(range).as_str()
+    pub fn text_slice<R: RangeBounds<usize>>(&self, range: R) -> String {
+        self.rope.slice(range).chars().collect()
     }
 }
 
@@ -320,7 +363,17 @@ impl Buffer {
 mod tests {
     use std::io::Cursor;
 
-    use crate::buffer::{Buffer, BufferSource, Movement};
+    use crate::buffer::{Action, Buffer, BufferSource, Movement};
+
+    #[test]
+    fn selection() {
+        let mut buf = Buffer::from_reader(Cursor::new("test"), BufferSource::Text);
+        buf.move_cursor(Movement::Right, true);
+        buf.move_cursor(Movement::Right, true);
+        buf.do_action(Action::Insert("as".into()));
+        assert_eq!(buf.cursor.head, buf.cursor.head);
+        assert_eq!(buf.text(), "asst")
+    }
 
     #[test]
     fn edit() {
@@ -405,43 +458,43 @@ xyzefv
         .to_string();
 
         let mut b = Buffer::from_reader(Cursor::new(str), BufferSource::Text);
-        assert_eq!(b.cursor(), 0);
-        b.move_cursor(Movement::Right);
-        assert_eq!(b.cursor(), 1);
-        b.move_cursor(Movement::Right);
-        assert_eq!(b.cursor(), 2);
-        b.move_cursor(Movement::Right);
-        assert_eq!(b.cursor(), 3);
-        b.move_cursor(Movement::Right);
-        assert_eq!(b.cursor(), 4);
-        b.move_cursor(Movement::Down);
-        assert_eq!(b.cursor(), 8);
-        b.move_cursor(Movement::Left);
-        b.move_cursor(Movement::Up);
-        assert_eq!(b.cursor(), 2);
-        b.move_cursor(Movement::Up);
-        assert_eq!(b.cursor(), 2);
-        b.move_cursor(Movement::Left);
-        b.move_cursor(Movement::Left);
-        b.move_cursor(Movement::Left);
-        b.move_cursor(Movement::Left);
-        b.move_cursor(Movement::Left);
-        assert_eq!(b.cursor(), 0);
-        b.move_cursor(Movement::Right);
-        assert_eq!(b.cursor(), 1);
-        b.move_cursor(Movement::Down);
-        assert_eq!(b.cursor(), 6);
-        b.move_cursor(Movement::Down);
-        assert_eq!(b.cursor(), 10);
-        b.move_cursor(Movement::Down);
-        assert_eq!(b.cursor(), 10);
-        b.move_cursor(Movement::Right);
-        b.move_cursor(Movement::Right);
-        b.move_cursor(Movement::Right);
-        b.move_cursor(Movement::Right);
-        b.move_cursor(Movement::Right);
-        b.move_cursor(Movement::Right);
-        b.move_cursor(Movement::Right);
-        assert_eq!(b.cursor(), 15);
+        assert_eq!(b.cursor().head, 0);
+        b.move_cursor(Movement::Right, false);
+        assert_eq!(b.cursor().head, 1);
+        b.move_cursor(Movement::Right, false);
+        assert_eq!(b.cursor().head, 2);
+        b.move_cursor(Movement::Right, false);
+        assert_eq!(b.cursor().head, 3);
+        b.move_cursor(Movement::Right, false);
+        assert_eq!(b.cursor().head, 4);
+        b.move_cursor(Movement::Down, false);
+        assert_eq!(b.cursor().head, 8);
+        b.move_cursor(Movement::Left, false);
+        b.move_cursor(Movement::Up, false);
+        assert_eq!(b.cursor().head, 2);
+        b.move_cursor(Movement::Up, false);
+        assert_eq!(b.cursor().head, 2);
+        b.move_cursor(Movement::Left, false);
+        b.move_cursor(Movement::Left, false);
+        b.move_cursor(Movement::Left, false);
+        b.move_cursor(Movement::Left, false);
+        b.move_cursor(Movement::Left, false);
+        assert_eq!(b.cursor().head, 0);
+        b.move_cursor(Movement::Right, false);
+        assert_eq!(b.cursor().head, 1);
+        b.move_cursor(Movement::Down, false);
+        assert_eq!(b.cursor().head, 6);
+        b.move_cursor(Movement::Down, false);
+        assert_eq!(b.cursor().head, 10);
+        b.move_cursor(Movement::Down, false);
+        assert_eq!(b.cursor().head, 10);
+        b.move_cursor(Movement::Right, false);
+        b.move_cursor(Movement::Right, false);
+        b.move_cursor(Movement::Right, false);
+        b.move_cursor(Movement::Right, false);
+        b.move_cursor(Movement::Right, false);
+        b.move_cursor(Movement::Right, false);
+        b.move_cursor(Movement::Right, false);
+        assert_eq!(b.cursor().head, 15);
     }
 }

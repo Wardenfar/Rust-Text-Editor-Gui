@@ -331,7 +331,6 @@ impl LspClient {
 }
 
 fn convert_completions(mut input: Vec<CompletionItem>) -> Vec<LspCompletion> {
-    dbg!(&input);
     input
         .drain(..)
         .filter_map(|c| {

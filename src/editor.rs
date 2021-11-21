@@ -1,21 +1,19 @@
-use anyhow::Context;
 use std::cmp::{max, min};
 use std::io::Cursor;
 
 use druid::kurbo::Line;
 use druid::piet::*;
-use druid::platform_menus::win::file::new;
 use druid::*;
 use itertools::Itertools;
 use lsp_types::Url;
 use ropey::RopeSlice;
 
-use crate::buffer::{Action, Bounds, Buffer, BufferSource, IntoWithBuffer, Movement};
+use crate::buffer::{Action, Buffer, BufferSource, Movement};
 use crate::fs::Path;
 use crate::highlight::{Highlight, Region, TreeSitterHighlight};
 use crate::lsp::{lsp_send, lsp_try_recv, CompletionData, LspInput, LspLang, LspOutput};
 use crate::theme::Style;
-use crate::{AppState, FontFamily, FontWeight, LocalPath, LSP, THEME};
+use crate::{AppState, LocalPath, THEME};
 
 pub struct TextEditor {
     buffer: Buffer,
@@ -151,6 +149,7 @@ impl Widget<AppState> for TextEditor {
     fn event(&mut self, ctx: &mut EventCtx, event: &Event, data: &mut AppState, _env: &Env) {
         match event {
             Event::KeyDown(key) => {
+                let is_shift = key.mods.shift();
                 let dirty = match &key.code {
                     Code::Space if key.mods.ctrl() => {
                         if let BufferSource::File { uri } = &self.buffer.source {
@@ -176,7 +175,7 @@ impl Widget<AppState> for TextEditor {
                         if let Some(c) = c {
                             match &c.data {
                                 CompletionData::Simple(text) => {
-                                    self.buffer.insert(cursor, &text);
+                                    self.buffer.insert(cursor.head, &text);
                                 }
                                 CompletionData::Edit { range, new_text } => {
                                     self.buffer.remove_chars(range);
@@ -192,10 +191,10 @@ impl Widget<AppState> for TextEditor {
                         println!("{:?}", self.buffer.text());
                         false
                     }
-                    Code::ArrowDown => self.buffer.move_cursor(Movement::Down),
-                    Code::ArrowLeft => self.buffer.move_cursor(Movement::Left),
-                    Code::ArrowRight => self.buffer.move_cursor(Movement::Right),
-                    Code::ArrowUp => self.buffer.move_cursor(Movement::Up),
+                    Code::ArrowDown => self.buffer.move_cursor(Movement::Down, is_shift),
+                    Code::ArrowLeft => self.buffer.move_cursor(Movement::Left, is_shift),
+                    Code::ArrowRight => self.buffer.move_cursor(Movement::Right, is_shift),
+                    Code::ArrowUp => self.buffer.move_cursor(Movement::Up, is_shift),
                     Code::Backspace => self.do_action(Action::Backspace, data),
                     Code::Delete => self.do_action(Action::Delete, data),
                     Code::Enter => self.do_action(Action::Insert("\n".into()), data),
@@ -278,7 +277,7 @@ impl Widget<AppState> for TextEditor {
 
         let mut cursor_point = None;
 
-        let cursor = self.buffer.cursor();
+        let cursor = self.buffer.cursor().head;
         self.layouts = vec![];
         let rope = self.buffer.rope();
         let mut y = 0.0;
@@ -319,6 +318,21 @@ impl Widget<AppState> for TextEditor {
 
             let mut x = 0.0;
             for part in &parts {
+                let sel_min = max(part.start_char, self.buffer.cursor().min())
+                    .saturating_sub(part.start_char);
+                let sel_max =
+                    min(part.end_char, self.buffer.cursor().max()).saturating_sub(part.start_char);
+
+                if sel_min < sel_max {
+                    let rects = part.layout.rects_for_range(sel_min..sel_max);
+                    ctx.with_save(|ctx| {
+                        ctx.transform(Affine::translate(Vec2::new(x, y)));
+                        for r in rects {
+                            ctx.fill(r, &THEME.scope("ui.selection").bg())
+                        }
+                    });
+                }
+
                 ctx.draw_text(&part.layout, Point::new(x, y));
 
                 if part.start_char <= cursor && cursor <= part.end_char {

@@ -1,44 +1,18 @@
 extern crate druid;
 
 use std::ops::Sub;
-use std::sync::Mutex;
 
 use druid::widget::{Flex, Label, Padding, Painter};
 use druid::*;
+use ste_lib::{AppState, EDITOR_FONT, FONT, FS};
 
-use crate::editor::TextEditor;
-use crate::fs::{FileSystem, LocalFs, LocalPath};
-use crate::lsp::LspSystem;
-use crate::theme::Theme;
-
-mod buffer;
-mod editor;
-mod fs;
-mod highlight;
-mod lsp;
-mod theme;
+use ste_lib::editor::TextEditor;
+use ste_lib::fs::FileSystem;
 
 const WINDOW_TITLE: LocalizedString<AppState> = LocalizedString::new("Hello World!");
 
-pub const FONT: Key<FontDescriptor> = Key::new("ui.font");
-pub const EDITOR_FONT: Key<FontDescriptor> = Key::new("editor.font");
-
-#[derive(Clone, Data, Lens)]
-struct AppState {
-    root_path: LocalPath,
-    file_path: Option<LocalPath>,
-}
-
-lazy_static::lazy_static! {
-    pub static ref THEME: Theme = toml::from_str(include_str!("../runtime/themes/default.toml")).unwrap();
-    pub static ref FS: LocalFs = LocalFs::default();
-    pub static ref LSP: Mutex<LspSystem> = Mutex::new(LspSystem::default());
-}
-
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    dbg!(THEME.scope("keyword"));
-
     // describe the main window
     let main_window = WindowDesc::new(build_root_widget)
         .title(WINDOW_TITLE)
