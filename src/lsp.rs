@@ -5,19 +5,16 @@ use std::process::Command;
 
 use crate::LSP;
 use anyhow::Context;
+use jsonrpc_core::id::Id;
 use jsonrpc_core::Output;
-use lsp_types::{
-    CompletionClientCapabilities, CompletionItem, CompletionItemCapability, CompletionResponse,
-    CompletionTextEdit, GeneralClientCapabilities, PublishDiagnosticsClientCapabilities, Range,
-    TextDocumentClientCapabilities, TextDocumentContentChangeEvent, TraceOption, Url,
-    VersionedTextDocumentIdentifier,
-};
+use lsp_types::*;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::sync::mpsc;
 use tokio::sync::mpsc::error::TryRecvError;
 
 const ID_INIT: u64 = 0;
 const ID_COMPLETION: u64 = 1;
+const ID_COMPLETION_RESOLVE: u64 = 2;
 
 #[derive(Debug, Clone, Hash, Eq, PartialEq)]
 pub enum LspLang {
@@ -36,7 +33,17 @@ impl LspLang {
         match self {
             LspLang::Rust => {
                 let mut cmd = std::process::Command::new("rustup");
-                cmd.args(["run", "nightly", "rust-analyzer", "--log-file", "logs.txt"]);
+                cmd.args([
+                    "run",
+                    "nightly",
+                    "rust-analyzer",
+                    "-v",
+                    "-v",
+                    "-v",
+                    "--no-log-buffering",
+                    "--log-file",
+                    "logs.txt",
+                ]);
                 cmd
             }
         }
@@ -86,6 +93,9 @@ pub enum LspInput {
         row: u32,
         col: u32,
     },
+    RequestCompletionResolve {
+        item: CompletionItem,
+    },
     OpenFile {
         uri: Url,
         content: String,
@@ -98,10 +108,12 @@ pub enum LspInput {
 #[derive(Debug)]
 pub enum LspOutput {
     Completion(Vec<LspCompletion>),
+    CompletionResolve(LspCompletion),
 }
 
 #[derive(Debug, Clone)]
 pub struct LspCompletion {
+    pub original_item: CompletionItem,
     pub label: String,
     pub data: CompletionData,
 }
@@ -109,11 +121,14 @@ pub struct LspCompletion {
 #[derive(Debug, Clone)]
 pub enum CompletionData {
     Simple(String),
-    Edit { range: Range, new_text: String },
+    Edits(Vec<TextEdit>),
 }
 
 #[derive(Debug, Clone)]
-pub struct TextEdit {}
+pub struct TextEdit {
+    pub range: Range,
+    pub new_text: String,
+}
 
 impl LspClient {
     fn new(root_path: Url, cmd: Command) -> anyhow::Result<LspClient> {
@@ -137,18 +152,20 @@ impl LspClient {
                     completion: Some(CompletionClientCapabilities {
                         dynamic_registration: Some(false),
                         completion_item: Some(CompletionItemCapability {
-                            snippet_support: None,
+                            snippet_support: Some(false),
                             commit_characters_support: None,
                             documentation_format: None,
                             deprecated_support: None,
-                            preselect_support: Some(true),
+                            preselect_support: None,
                             tag_support: None,
                             insert_replace_support: None,
-                            resolve_support: None,
+                            resolve_support: Some(CompletionItemCapabilityResolveSupport {
+                                properties: vec!["additionalTextEdits".into()],
+                            }),
                             insert_text_mode_support: None,
                         }),
                         completion_item_kind: None,
-                        context_support: Some(true),
+                        context_support: Some(false),
                     }),
                     hover: None,
                     signature_help: None,
@@ -247,7 +264,10 @@ impl LspClient {
                             },
                             work_done_progress_params: Default::default(),
                             partial_result_params: Default::default(),
-                            context: None,
+                            context: Some(CompletionContext {
+                                trigger_kind: CompletionTriggerKind::INVOKED,
+                                trigger_character: None,
+                            }),
                         };
                         send_request_async::<_, lsp_types::request::Completion>(
                             &mut stdin,
@@ -256,6 +276,15 @@ impl LspClient {
                         )
                         .await
                         .unwrap();
+                    }
+                    LspInput::RequestCompletionResolve { item } => {
+                        send_request_async::<_, lsp_types::request::ResolveCompletionItem>(
+                            &mut stdin,
+                            ID_COMPLETION_RESOLVE,
+                            item,
+                        )
+                        .await
+                        .unwrap()
                     }
                     LspInput::OpenFile { uri: url, content } => {
                         let open = lsp_types::DidOpenTextDocumentParams {
@@ -307,9 +336,9 @@ impl LspClient {
                 let msg = String::from_utf8(content)?;
                 let output: serde_json::Result<Output> = serde_json::from_str(&msg);
                 if let Ok(Output::Success(suc)) = output {
-                    if suc.id == jsonrpc_core::id::Id::Num(ID_INIT) {
+                    if suc.id == Id::Num(ID_INIT) {
                         init_tx.send(())?;
-                    } else if suc.id == jsonrpc_core::id::Id::Num(ID_COMPLETION) {
+                    } else if suc.id == Id::Num(ID_COMPLETION) {
                         let completion =
                             serde_json::from_value::<lsp_types::CompletionResponse>(suc.result)?;
                         let completions = match completion {
@@ -317,6 +346,12 @@ impl LspClient {
                             CompletionResponse::List(list) => convert_completions(list.items),
                         };
                         tx.send(LspOutput::Completion(completions))?;
+                    } else if suc.id == Id::Num(ID_COMPLETION_RESOLVE) {
+                        println!("{}", suc.result);
+                        let item: CompletionItem = serde_json::from_value(suc.result)?;
+                        tx.send(LspOutput::CompletionResolve(
+                            convert_completion(item).unwrap(),
+                        ))?;
                     }
                 }
             }
@@ -333,30 +368,45 @@ impl LspClient {
 fn convert_completions(mut input: Vec<CompletionItem>) -> Vec<LspCompletion> {
     input
         .drain(..)
-        .filter_map(|c| {
-            if let Some(insert_text) = c.insert_text {
-                Some(LspCompletion {
-                    label: c.label,
-                    data: CompletionData::Simple(insert_text),
-                })
-            } else if let Some(text_edit) = c.text_edit {
-                match text_edit {
-                    CompletionTextEdit::Edit(e) => Some(LspCompletion {
-                        label: c.label,
-                        data: CompletionData::Edit {
-                            range: e.range,
-                            new_text: e.new_text,
-                        },
-                    }),
-                    CompletionTextEdit::InsertAndReplace(_) => {
-                        unimplemented!("insert and replace")
-                    }
-                }
-            } else {
-                None
-            }
-        })
+        .filter_map(|c| convert_completion(c))
         .collect()
+}
+
+fn convert_completion(c: CompletionItem) -> Option<LspCompletion> {
+    let clone = c.clone();
+    if let Some(insert_text) = c.insert_text {
+        Some(LspCompletion {
+            original_item: clone,
+            label: c.label,
+            data: CompletionData::Simple(insert_text),
+        })
+    } else if let Some(text_edit) = c.text_edit {
+        let mut edits = vec![];
+        match text_edit {
+            CompletionTextEdit::Edit(e) => edits.push(TextEdit {
+                range: e.range,
+                new_text: e.new_text,
+            }),
+            CompletionTextEdit::InsertAndReplace(_) => {
+                unimplemented!("insert and replace")
+            }
+        }
+        if let Some(additionals) = c.additional_text_edits {
+            for a in additionals {
+                edits.push(TextEdit {
+                    range: a.range,
+                    new_text: a.new_text,
+                })
+            }
+        }
+        Some(LspCompletion {
+            original_item: clone,
+            label: c.label,
+            data: CompletionData::Edits(edits),
+        })
+    } else {
+        None
+    }
 }
 
 async fn send_request_async<T: AsyncWrite + std::marker::Unpin, R: lsp_types::request::Request>(
@@ -372,7 +422,7 @@ where
             jsonrpc: Some(jsonrpc_core::Version::V2),
             method: R::METHOD.to_string(),
             params: jsonrpc_core::Params::Map(params),
-            id: jsonrpc_core::Id::Num(id),
+            id: Id::Num(id),
         });
         let request = serde_json::to_string(&req)?;
         println!("REQUEST: {}", request);

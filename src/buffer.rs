@@ -113,13 +113,17 @@ impl Buffer {
                     }
                     0
                 }
-                CompletionData::Edit { range, new_text } => {
-                    let bounds: Bounds = range.into_with_buf(&self);
+                CompletionData::Edits(edits) => {
+                    let edit = edits.get(0).unwrap();
+
+                    let bounds: Bounds = (&edit.range).into_with_buf(&self);
 
                     let buf_text = self.text_slice(bounds.0..bounds.1);
-                    if new_text.starts_with(&buf_text) {
+                    if edit.new_text.eq(&buf_text) {
+                        4
+                    } else if edit.new_text.starts_with(&buf_text) {
                         3
-                    } else if new_text.contains(&buf_text) {
+                    } else if edit.new_text.contains(&buf_text) {
                         2
                     } else {
                         1

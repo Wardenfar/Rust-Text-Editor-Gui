@@ -8,7 +8,7 @@ use itertools::Itertools;
 use lsp_types::Url;
 use ropey::RopeSlice;
 
-use crate::buffer::{Action, Buffer, BufferSource, Movement};
+use crate::buffer::{Action, Bounds, Buffer, BufferSource, IntoWithBuffer, Movement};
 use crate::fs::Path;
 use crate::highlight::{Highlight, Region, TreeSitterHighlight};
 use crate::lsp::{lsp_send, lsp_try_recv, CompletionData, LspInput, LspLang, LspOutput};
@@ -166,22 +166,19 @@ impl Widget<AppState> for TextEditor {
                         false
                     }
                     Code::F1 => {
-                        let cursor = self.buffer.cursor();
                         let c = self
                             .buffer
                             .sorted_completions()
                             .first()
                             .map(|c| (*c).clone());
                         if let Some(c) = c {
-                            match &c.data {
-                                CompletionData::Simple(text) => {
-                                    self.buffer.insert(cursor.head, &text);
-                                }
-                                CompletionData::Edit { range, new_text } => {
-                                    self.buffer.remove_chars(range);
-                                    self.buffer.insert(&range.start, &new_text);
-                                }
-                            };
+                            lsp_send(
+                                data.root_path.uri(),
+                                LspLang::Rust,
+                                LspInput::RequestCompletionResolve {
+                                    item: c.original_item,
+                                },
+                            );
                             true
                         } else {
                             false
@@ -225,6 +222,29 @@ impl Widget<AppState> for TextEditor {
             match data {
                 LspOutput::Completion(completions) => {
                     self.buffer.completions = completions;
+                    ctx.request_paint();
+                }
+                LspOutput::CompletionResolve(c) => {
+                    let cursor = self.buffer.cursor();
+                    match &c.data {
+                        CompletionData::Simple(text) => {
+                            self.buffer.insert(cursor.head, &text);
+                        }
+                        CompletionData::Edits(edits) => {
+                            edits
+                                .iter()
+                                .sorted_by_key(|e| {
+                                    let bounds: Bounds = (&e.range).into_with_buf(&self.buffer);
+                                    bounds.0
+                                })
+                                .rev()
+                                .for_each(|e| {
+                                    self.buffer.remove_chars(&e.range);
+                                    self.buffer.insert(&e.range.start, &e.new_text);
+                                });
+                        }
+                    };
+                    self.calculate_highlight();
                     ctx.request_paint();
                 }
             }
