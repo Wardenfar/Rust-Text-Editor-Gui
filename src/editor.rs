@@ -8,7 +8,7 @@ use itertools::Itertools;
 use lsp_types::Url;
 use ropey::RopeSlice;
 
-use crate::buffer::{Action, Bounds, Buffer, BufferSource, IntoWithBuffer, Movement};
+use crate::buffer::{Action, Bounds, Buffer, BufferSource, Index, IntoWithBuffer, Movement};
 use crate::fs::Path;
 use crate::highlight::{Highlight, Region, TreeSitterHighlight};
 use crate::lsp::{lsp_send, lsp_try_recv, CompletionData, LspInput, LspLang, LspOutput};
@@ -20,7 +20,7 @@ pub const HALF_LINE_SPACING: f64 = LINE_SPACING / 2.0;
 
 pub struct TextEditor {
     buffer: Buffer,
-    layouts: Vec<D2DTextLayout>,
+    char_points: Vec<(Point, Index)>,
     regions: Vec<Region>,
     highlight: TreeSitterHighlight,
 }
@@ -42,7 +42,7 @@ impl TextEditor {
         let highlight = TreeSitterHighlight::new();
         let mut editor = Self {
             buffer,
-            layouts: vec![],
+            char_points: vec![],
             regions: vec![],
             highlight,
         };
@@ -217,7 +217,21 @@ impl Widget<AppState> for TextEditor {
                 }
                 ctx.request_paint()
             }
-            Event::MouseDown(_) => ctx.request_focus(),
+            Event::MouseDown(e) => {
+                if e.button.is_left() {
+                    let found = self
+                        .char_points
+                        .iter()
+                        .sorted_by_key(|(p, _)| p.distance(e.pos.clone()) as i64)
+                        .next();
+                    if let Some((_, idx)) = found {
+                        self.buffer
+                            .move_cursor(Movement::Index(*idx), e.mods.shift());
+                        ctx.request_paint()
+                    }
+                }
+                ctx.request_focus()
+            }
             _ => {}
         }
 
@@ -332,7 +346,7 @@ impl Widget<AppState> for TextEditor {
         let mut cursor_point = None;
 
         let cursor = self.buffer.cursor().head;
-        self.layouts = vec![];
+        self.char_points = vec![];
         let mut y = HALF_LINE_SPACING;
 
         for line in 0..rope.len_lines() {
@@ -382,6 +396,15 @@ impl Widget<AppState> for TextEditor {
 
             let mut x = linenr_max_width + LINE_SPACING * 2.0;
             for part in &parts {
+                for idx in part.start_char..part.end_char {
+                    let with_offset = idx - part.start_char;
+                    let rects = part.layout.rects_for_range(with_offset..=with_offset);
+                    for r in rects {
+                        let point = Point::new(r.x0 + x, y + (r.y0 + r.y1) / 2.0);
+                        self.char_points.push((point, idx))
+                    }
+                }
+
                 let sel_min = max(part.start_char, self.buffer.cursor().min())
                     .saturating_sub(part.start_char);
                 let sel_max =
@@ -391,7 +414,8 @@ impl Widget<AppState> for TextEditor {
                     let rects = part.layout.rects_for_range(sel_min..sel_max);
                     ctx.with_save(|ctx| {
                         ctx.transform(Affine::translate(Vec2::new(x, y)));
-                        for r in rects {
+                        for mut r in rects {
+                            r.y1 += LINE_SPACING;
                             ctx.fill(r, &THEME.scope("ui.selection").bg())
                         }
                     });

@@ -27,6 +27,7 @@ pub enum Movement {
     Down,
     Left,
     Right,
+    Index(Index),
 }
 
 pub enum Action {
@@ -242,6 +243,7 @@ impl Buffer {
                     self.cursor.max()
                 }
             }
+            Movement::Index(idx) => idx,
         };
 
         self.cursor.head = min(new, max);

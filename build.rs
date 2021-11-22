@@ -1,7 +1,12 @@
 use std::path::PathBuf;
 
 fn main() {
-    let langs = ["tree-sitter-json", "tree-sitter-python", "tree-sitter-rust"];
+    let langs = [
+        "tree-sitter-json",
+        "tree-sitter-python",
+        "tree-sitter-rust",
+        "tree-sitter-java",
+    ];
 
     for name in langs {
         let dir: PathBuf = ["languages", name, "src"].iter().collect();
