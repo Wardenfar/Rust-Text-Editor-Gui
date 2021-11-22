@@ -48,9 +48,11 @@ impl Cursor {
     pub fn min(&self) -> Index {
         min(self.head, self.tail)
     }
-
     pub fn max(&self) -> Index {
         max(self.head, self.tail)
+    }
+    pub fn same(&self) -> bool {
+        self.head == self.tail
     }
 }
 
@@ -198,8 +200,6 @@ impl Buffer {
     }
 
     pub fn move_cursor(&mut self, m: Movement, keep_selection: bool) -> bool {
-        let cur_head = self.cursor.head;
-
         let line = self.row();
 
         let prev_line = self.line_bounds(line.saturating_sub(1));
@@ -208,28 +208,38 @@ impl Buffer {
 
         let max = self.rope.len_chars();
         let new = match m {
-            Movement::Up => prev_line.0 + min(prev_line.1 - prev_line.0, cur_head - curr_line.0),
+            Movement::Up => {
+                prev_line.0 + min(prev_line.1 - prev_line.0, self.cursor.head - curr_line.0)
+            }
             Movement::Down => {
                 if line >= self.rope.len_lines() - 1 {
-                    cur_head
+                    self.cursor.head
                 } else {
-                    next_line.0 + min(next_line.1 - next_line.0, cur_head - curr_line.0)
+                    next_line.0 + min(next_line.1 - next_line.0, self.cursor.head - curr_line.0)
                 }
             }
             Movement::Left => {
-                let next = cur_head.saturating_sub(1);
-                if next < curr_line.0 {
-                    prev_line.1
+                if keep_selection || self.cursor.same() {
+                    let next = self.cursor.head.saturating_sub(1);
+                    if next < curr_line.0 {
+                        prev_line.1
+                    } else {
+                        next
+                    }
                 } else {
-                    next
+                    self.cursor.min()
                 }
             }
             Movement::Right => {
-                let next = cur_head.saturating_add(1);
-                if next > curr_line.1 {
-                    next_line.0
+                if keep_selection || self.cursor.same() {
+                    let next = self.cursor.head.saturating_add(1);
+                    if next > curr_line.1 {
+                        next_line.0
+                    } else {
+                        next
+                    }
                 } else {
-                    next
+                    self.cursor.max()
                 }
             }
         };
