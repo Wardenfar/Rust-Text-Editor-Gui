@@ -43,16 +43,12 @@ fn build_root_widget() -> impl Widget<AppState> {
 
     // arrange the two widgets vertically, with some padding
     let layout = Flex::column()
-        .with_default_spacer()
         .with_flex_child(editor, 1.0)
         .with_default_spacer()
         .with_child(button)
         .with_default_spacer();
 
-    let layout = Flex::row()
-        .with_default_spacer()
-        .with_flex_child(layout, 1.0)
-        .with_default_spacer();
+    let layout = Flex::row().with_flex_child(layout, 1.0);
 
     // center the two widgets in the available space
     layout.env_scope(|env: &mut druid::Env, _data: &AppState| {

@@ -15,6 +15,9 @@ use crate::lsp::{lsp_send, lsp_try_recv, CompletionData, LspInput, LspLang, LspO
 use crate::theme::Style;
 use crate::{AppState, LocalPath, THEME};
 
+pub const LINE_SPACING: f64 = 4.0;
+pub const HALF_LINE_SPACING: f64 = LINE_SPACING / 2.0;
+
 pub struct TextEditor {
     buffer: Buffer,
     layouts: Vec<D2DTextLayout>,
@@ -295,12 +298,43 @@ impl Widget<AppState> for TextEditor {
         ctx.save().unwrap();
         ctx.clip(rect);
 
+        let rope = self.buffer.rope();
+
+        let cursor_row = self.buffer.row();
+        let line_numbers_layouts = (0..rope.len_lines())
+            .into_iter()
+            .map(|n| {
+                let style = if n == cursor_row {
+                    THEME.scope("ui.linenr.selected")
+                } else {
+                    THEME.scope("ui.linenr")
+                };
+                text_layout(ctx, env, &format!("{}", n + 1), &style)
+                    .build()
+                    .unwrap()
+            })
+            .collect::<Vec<_>>();
+        let linenr_max_width = line_numbers_layouts
+            .iter()
+            .map(|l| l.size().width.floor() as i64)
+            .max()
+            .unwrap() as f64
+            + LINE_SPACING * 4.0;
+        ctx.stroke(
+            Line::new(
+                Point::new(linenr_max_width, 0.0),
+                Point::new(linenr_max_width, rect.height()),
+            ),
+            &THEME.scope("ui.popup").bg(),
+            1.0,
+        );
+
         let mut cursor_point = None;
 
         let cursor = self.buffer.cursor().head;
         self.layouts = vec![];
-        let rope = self.buffer.rope();
-        let mut y = 0.0;
+        let mut y = HALF_LINE_SPACING;
+
         for line in 0..rope.len_lines() {
             let bounds = self.buffer.line_bounds(line);
             let slice = rope.slice(bounds.0..bounds.1);
@@ -336,7 +370,17 @@ impl Widget<AppState> for TextEditor {
                 .max_by(|a, b| a.partial_cmp(b).unwrap())
                 .unwrap();
 
-            let mut x = 0.0;
+            if let Some(layout) = line_numbers_layouts.get(line) {
+                ctx.draw_text(
+                    layout,
+                    Point::new(
+                        linenr_max_width - layout.size().width - LINE_SPACING * 2.0,
+                        y,
+                    ),
+                )
+            }
+
+            let mut x = linenr_max_width + LINE_SPACING * 2.0;
             for part in &parts {
                 let sel_min = max(part.start_char, self.buffer.cursor().min())
                     .saturating_sub(part.start_char);
@@ -362,16 +406,16 @@ impl Widget<AppState> for TextEditor {
                     let curr_x = x + hit.point.x;
                     let line = Line::new(
                         Point::new(curr_x, y),
-                        Point::new(curr_x, y + max_height + 4.0),
+                        Point::new(curr_x, y + max_height + LINE_SPACING),
                     );
-                    cursor_point = Some((curr_x, y + max_height + 4.0));
+                    cursor_point = Some((curr_x, y + max_height + LINE_SPACING));
                     ctx.stroke(line, &Color::RED, 1.0);
                 }
 
                 x += part.layout.trailing_whitespace_width();
             }
 
-            y += max_height + 4.0;
+            y += max_height + LINE_SPACING;
         }
 
         let cursor_point = cursor_point.unwrap_or((0.0, 0.0));
