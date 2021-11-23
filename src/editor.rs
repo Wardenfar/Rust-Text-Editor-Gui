@@ -16,6 +16,7 @@ use crate::theme::Style;
 use crate::{AppState, LocalPath, THEME};
 
 pub const LINE_SPACING: f64 = 4.0;
+pub const SCROLL_GAP: usize = 4;
 pub const HALF_LINE_SPACING: f64 = LINE_SPACING / 2.0;
 
 pub struct TextEditor {
@@ -23,6 +24,8 @@ pub struct TextEditor {
     char_points: Vec<(Point, Index)>,
     regions: Vec<Region>,
     highlight: TreeSitterHighlight,
+    scroll_line: usize,
+    last_line_painted: usize,
 }
 
 impl TextEditor {
@@ -45,6 +48,8 @@ impl TextEditor {
             char_points: vec![],
             regions: vec![],
             highlight,
+            scroll_line: 0,
+            last_line_painted: 0,
         };
         editor.calculate_highlight();
         editor
@@ -91,30 +96,14 @@ impl TextEditor {
             let end_char = slice.byte_to_char(end_byte);
             let line_slice = slice.slice(start_char..end_char);
 
-            let mut builder = text_layout(ctx, env, line_slice.as_str().unwrap(), &cut.style);
-
-            let style = &cut.style;
-
-            builder = builder.range_attribute(.., TextAttribute::TextColor(style.fg()));
-
-            if style.bold() {
-                builder = builder.range_attribute(.., TextAttribute::Weight(FontWeight::BOLD));
-            }
-            if style.italic() {
-                builder = builder.range_attribute(.., TextAttribute::Style(FontStyle::Italic));
-            }
-            if style.underline() {
-                builder = builder.range_attribute(.., TextAttribute::Underline(true));
-            }
-
-            let layout = builder.build().unwrap();
+            let layout = text_layout(ctx, env, line_slice.as_str().unwrap(), &cut.style);
 
             parts.push(TextPart {
                 layout,
                 slice: line_slice,
                 start_char: global_start_char + start_char,
                 end_char: global_start_char + end_char,
-                style: style.clone(),
+                style: cut.style.clone(),
             });
         }
         parts
@@ -145,6 +134,17 @@ impl TextEditor {
             style: Style::default(),
         });
         cuts
+    }
+
+    fn scroll(&mut self, scroll: isize) {
+        if scroll < 0 {
+            self.scroll_line = self.scroll_line.saturating_sub(scroll.abs() as usize)
+        }
+        if scroll > 0 {
+            self.scroll_line = self.scroll_line.saturating_add(scroll as usize)
+        }
+
+        self.scroll_line = min(self.scroll_line, self.buffer.rope().len_lines() - 1);
     }
 }
 
@@ -217,6 +217,16 @@ impl Widget<AppState> for TextEditor {
                 }
                 ctx.request_paint()
             }
+            Event::Wheel(e) => {
+                if e.wheel_delta.y < 0.0 {
+                    self.scroll(-3);
+                    ctx.request_paint();
+                }
+                if e.wheel_delta.y > 0.0 {
+                    self.scroll(3);
+                    ctx.request_paint();
+                }
+            }
             Event::MouseDown(e) => {
                 if e.button.is_left() {
                     let found = self
@@ -233,6 +243,17 @@ impl Widget<AppState> for TextEditor {
                 ctx.request_focus()
             }
             _ => {}
+        }
+
+        let cursor_row = self.buffer.row();
+        if self.buffer.rope().len_lines() <= SCROLL_GAP * 2 {
+            self.scroll_line = 0;
+        } else if cursor_row.saturating_sub(SCROLL_GAP) < self.scroll_line {
+            self.scroll_line = cursor_row.saturating_sub(SCROLL_GAP)
+        } else if cursor_row.saturating_add(SCROLL_GAP) > self.last_line_painted {
+            self.scroll_line = cursor_row
+                .saturating_add(SCROLL_GAP)
+                .saturating_sub(self.last_line_painted.saturating_sub(self.scroll_line))
         }
 
         if let Ok(data) = lsp_try_recv(data.root_path.uri(), LspLang::Rust) {
@@ -315,156 +336,173 @@ impl Widget<AppState> for TextEditor {
         let rope = self.buffer.rope();
 
         let cursor_row = self.buffer.row();
-        let line_numbers_layouts = (0..rope.len_lines())
-            .into_iter()
-            .map(|n| {
-                let style = if n == cursor_row {
-                    THEME.scope("ui.linenr.selected")
-                } else {
-                    THEME.scope("ui.linenr")
-                };
-                text_layout(ctx, env, &format!("{}", n + 1), &style)
-                    .build()
-                    .unwrap()
-            })
-            .collect::<Vec<_>>();
-        let linenr_max_width = line_numbers_layouts
-            .iter()
-            .map(|l| l.size().width.floor() as i64)
-            .max()
-            .unwrap() as f64
-            + LINE_SPACING * 4.0;
-        ctx.stroke(
-            Line::new(
-                Point::new(linenr_max_width, 0.0),
-                Point::new(linenr_max_width, rect.height()),
-            ),
-            &THEME.scope("ui.popup").bg(),
-            1.0,
-        );
 
-        let mut cursor_point = None;
-
-        let cursor = self.buffer.cursor().head;
-        self.char_points = vec![];
+        let mut line_numbers_layouts = Vec::new();
         let mut y = HALF_LINE_SPACING;
-
-        for line in 0..rope.len_lines() {
-            let bounds = self.buffer.line_bounds(line);
-            let slice = rope.slice(bounds.0..bounds.1);
-
-            let byte_start = rope.char_to_byte(bounds.0);
-            let byte_end = rope.char_to_byte(bounds.1);
-
-            let regions = self
-                .regions
-                .iter()
-                .filter_map(|r| {
-                    let start = max(byte_start, r.start_byte);
-                    let end = min(byte_end, r.end_byte);
-                    if start < end {
-                        Some(Region {
-                            index: r.index,
-                            start_byte: start - byte_start,
-                            end_byte: end - byte_start,
-                            style: r.style.clone(),
-                        })
-                    } else {
-                        None
-                    }
-                })
-                .collect::<Vec<_>>();
-
-            let cuts = Self::find_cuts(byte_end - byte_start, &regions);
-            let parts = Self::build_parts(ctx, env, bounds.0, slice, &cuts);
-
-            let max_height = parts
-                .iter()
-                .map(|l| l.layout.size().height)
-                .max_by(|a, b| a.partial_cmp(b).unwrap())
-                .unwrap();
-
-            if let Some(layout) = line_numbers_layouts.get(line) {
-                ctx.draw_text(
-                    layout,
-                    Point::new(
-                        linenr_max_width - layout.size().width - LINE_SPACING * 2.0,
-                        y,
-                    ),
-                )
-            }
-
-            let mut x = linenr_max_width + LINE_SPACING * 2.0;
-            for part in &parts {
-                for idx in part.start_char..part.end_char {
-                    let with_offset = idx - part.start_char;
-                    let rects = part.layout.rects_for_range(with_offset..=with_offset);
-                    for r in rects {
-                        let point = Point::new(r.x0 + x, y + (r.y0 + r.y1) / 2.0);
-                        self.char_points.push((point, idx))
-                    }
-                }
-
-                let sel_min = max(part.start_char, self.buffer.cursor().min())
-                    .saturating_sub(part.start_char);
-                let sel_max =
-                    min(part.end_char, self.buffer.cursor().max()).saturating_sub(part.start_char);
-
-                if sel_min < sel_max {
-                    let rects = part.layout.rects_for_range(sel_min..sel_max);
-                    ctx.with_save(|ctx| {
-                        ctx.transform(Affine::translate(Vec2::new(x, y)));
-                        for mut r in rects {
-                            r.y1 += LINE_SPACING;
-                            ctx.fill(r, &THEME.scope("ui.selection").bg())
-                        }
-                    });
-                }
-
-                ctx.draw_text(&part.layout, Point::new(x, y));
-
-                if part.start_char <= cursor && cursor <= part.end_char {
-                    let char_idx = cursor - part.start_char;
-                    let byte_idx = part.slice.char_to_byte(char_idx);
-                    let hit = part.layout.hit_test_text_position(byte_idx);
-                    let curr_x = x + hit.point.x;
-                    let line = Line::new(
-                        Point::new(curr_x, y),
-                        Point::new(curr_x, y + max_height + LINE_SPACING),
-                    );
-                    cursor_point = Some((curr_x, y + max_height + LINE_SPACING));
-                    ctx.stroke(line, &Color::RED, 1.0);
-                }
-
-                x += part.layout.trailing_whitespace_width();
-            }
-
-            y += max_height + LINE_SPACING;
+        self.last_line_painted = 0;
+        for n in self.scroll_line..rope.len_lines() {
+            let style = if n == cursor_row {
+                THEME.scope("ui.linenr.selected")
+            } else {
+                THEME.scope("ui.linenr")
+            };
+            let layout = text_layout(ctx, env, &format!("{}", n + 1), &style);
+            y += layout.size().height + LINE_SPACING;
+            line_numbers_layouts.push(layout);
         }
 
-        let cursor_point = cursor_point.unwrap_or((0.0, 0.0));
+        if !line_numbers_layouts.is_empty() {
+            let linenr_max_width = line_numbers_layouts
+                .iter()
+                .map(|l| l.size().width.floor() as i64)
+                .max()
+                .unwrap() as f64
+                + LINE_SPACING * 4.0;
 
-        let text = self
-            .buffer
-            .sorted_completions()
-            .iter()
-            .take(8)
-            .map(|c| &c.label)
-            .join("\n");
+            ctx.stroke(
+                Line::new(
+                    Point::new(linenr_max_width, 0.0),
+                    Point::new(linenr_max_width, rect.height()),
+                ),
+                &THEME.scope("ui.popup").bg(),
+                1.0,
+            );
 
-        let layout = text_layout(ctx, env, &text, &THEME.scope("ui.text"))
-            .build()
-            .unwrap();
+            let mut cursor_point = None;
 
-        let rect = Rect::new(
-            cursor_point.0,
-            cursor_point.1,
-            cursor_point.0 + layout.size().width,
-            cursor_point.1 + layout.size().height,
-        );
-        ctx.fill(rect, &THEME.scope("ui.popup").bg());
-        ctx.draw_text(&layout, Point::new(cursor_point.0, cursor_point.1));
+            let cursor = self.buffer.cursor().head;
+            self.char_points = vec![];
+            let mut y = HALF_LINE_SPACING;
 
+            self.last_line_painted = 0;
+
+            for (line_number_layout, line) in line_numbers_layouts
+                .iter()
+                .zip((0..).skip(self.scroll_line))
+            {
+                let bounds = self.buffer.line_bounds(line);
+                let slice = rope.slice(bounds.0..bounds.1);
+
+                let byte_start = rope.char_to_byte(bounds.0);
+                let byte_end = rope.char_to_byte(bounds.1);
+
+                let regions = self
+                    .regions
+                    .iter()
+                    .filter_map(|r| {
+                        let start = max(byte_start, r.start_byte);
+                        let end = min(byte_end, r.end_byte);
+                        if start < end {
+                            Some(Region {
+                                index: r.index,
+                                start_byte: start - byte_start,
+                                end_byte: end - byte_start,
+                                style: r.style.clone(),
+                            })
+                        } else {
+                            None
+                        }
+                    })
+                    .collect::<Vec<_>>();
+
+                let cuts = Self::find_cuts(byte_end - byte_start, &regions);
+                let parts = Self::build_parts(ctx, env, bounds.0, slice, &cuts);
+
+                let max_height = parts
+                    .iter()
+                    .map(|l| l.layout.size().height)
+                    .max_by(|a, b| a.partial_cmp(b).unwrap())
+                    .unwrap();
+
+                ctx.draw_text(
+                    line_number_layout,
+                    Point::new(
+                        linenr_max_width - line_number_layout.size().width - LINE_SPACING * 2.0,
+                        y,
+                    ),
+                );
+
+                let mut x = linenr_max_width + LINE_SPACING * 2.0;
+                for part in &parts {
+                    for idx in part.start_char..part.end_char {
+                        let with_offset = idx - part.start_char;
+                        let rects = part.layout.rects_for_range(with_offset..=with_offset);
+                        for r in rects {
+                            let point = Point::new(r.x0 + x, y + (r.y0 + r.y1) / 2.0);
+                            self.char_points.push((point, idx))
+                        }
+                    }
+
+                    let sel_min = max(part.start_char, self.buffer.cursor().min())
+                        .saturating_sub(part.start_char);
+                    let sel_max = min(part.end_char, self.buffer.cursor().max())
+                        .saturating_sub(part.start_char);
+
+                    if sel_min < sel_max {
+                        let rects = part.layout.rects_for_range(sel_min..sel_max);
+                        ctx.with_save(|ctx| {
+                            ctx.transform(Affine::translate(Vec2::new(x, y)));
+                            for mut r in rects {
+                                r.y1 += LINE_SPACING;
+                                ctx.fill(r, &THEME.scope("ui.selection").bg())
+                            }
+                        });
+                    }
+
+                    ctx.draw_text(&part.layout, Point::new(x, y));
+
+                    if part.start_char <= cursor && cursor <= part.end_char {
+                        let char_idx = cursor - part.start_char;
+                        let byte_idx = part.slice.char_to_byte(char_idx);
+                        let hit = part.layout.hit_test_text_position(byte_idx);
+                        let curr_x = x + hit.point.x;
+                        let line = Line::new(
+                            Point::new(curr_x, y),
+                            Point::new(curr_x, y + max_height + LINE_SPACING),
+                        );
+                        cursor_point = Some((curr_x, y + max_height + LINE_SPACING));
+                        ctx.stroke(line, &Color::RED, 1.0);
+                    }
+
+                    x += part.layout.trailing_whitespace_width();
+                }
+
+                y += max_height + LINE_SPACING;
+
+                if y > rect.height() {
+                    self.last_line_painted = line;
+                    break;
+                }
+            }
+
+            if self.last_line_painted == 0 {
+                let l = text_layout(ctx, env, "[]", &Style::default());
+                self.last_line_painted = ((rect.height() - y) / l.size().height).round() as usize
+                    + self.scroll_line
+                    + line_numbers_layouts.len();
+            }
+
+            let cursor_point = cursor_point.unwrap_or((0.0, 0.0));
+
+            let text = self
+                .buffer
+                .sorted_completions()
+                .iter()
+                .take(8)
+                .map(|c| &c.label)
+                .join("\n");
+
+            let layout = text_layout(ctx, env, &text, &THEME.scope("ui.text"));
+
+            let rect = Rect::new(
+                cursor_point.0,
+                cursor_point.1,
+                cursor_point.0 + layout.size().width,
+                cursor_point.1 + layout.size().height,
+            );
+            ctx.fill(rect, &THEME.scope("ui.popup").bg());
+            ctx.draw_text(&layout, Point::new(cursor_point.0, cursor_point.1));
+        }
         ctx.restore().unwrap()
     }
 }
@@ -483,12 +521,25 @@ pub struct Cut {
     pub style: Style,
 }
 
-fn text_layout(ctx: &mut PaintCtx, _env: &Env, text: &str, style: &Style) -> D2DTextLayoutBuilder {
-    ctx.text()
+fn text_layout(ctx: &mut PaintCtx, _env: &Env, text: &str, style: &Style) -> D2DTextLayout {
+    let mut builder = ctx
+        .text()
         .new_text_layout(text.to_string())
         .text_color(style.fg())
         .font(
             FontFamily::new_unchecked(style.font_family()),
             style.font_size(),
-        )
+        );
+
+    if style.bold() {
+        builder = builder.range_attribute(.., TextAttribute::Weight(FontWeight::BOLD));
+    }
+    if style.italic() {
+        builder = builder.range_attribute(.., TextAttribute::Style(FontStyle::Italic));
+    }
+    if style.underline() {
+        builder = builder.range_attribute(.., TextAttribute::Underline(true));
+    }
+
+    builder.build().unwrap()
 }
