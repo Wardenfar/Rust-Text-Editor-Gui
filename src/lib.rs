@@ -7,6 +7,7 @@ pub mod fs;
 pub mod highlight;
 pub mod lsp;
 pub mod theme;
+pub mod tree;
 
 use fs::LocalFs;
 use lsp::LspSystem;

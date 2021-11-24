@@ -36,6 +36,19 @@ impl TextEditor {
         }
         true
     }
+
+    fn fix_scroll(&mut self) {
+        let cursor_row = self.buffer.row();
+        if self.buffer.rope().len_lines() <= SCROLL_GAP * 2 {
+            self.scroll_line = 0;
+        } else if cursor_row.saturating_sub(SCROLL_GAP) < self.scroll_line {
+            self.scroll_line = cursor_row.saturating_sub(SCROLL_GAP)
+        } else if cursor_row.saturating_add(SCROLL_GAP) > self.last_line_painted {
+            self.scroll_line = cursor_row
+                .saturating_add(SCROLL_GAP)
+                .saturating_sub(self.last_line_painted.saturating_sub(self.scroll_line))
+        }
+    }
 }
 
 impl TextEditor {
@@ -215,6 +228,7 @@ impl Widget<AppState> for TextEditor {
                 if dirty {
                     self.calculate_highlight();
                 }
+                self.fix_scroll();
                 ctx.request_paint()
             }
             Event::Wheel(e) => {
@@ -237,23 +251,13 @@ impl Widget<AppState> for TextEditor {
                     if let Some((_, idx)) = found {
                         self.buffer
                             .move_cursor(Movement::Index(*idx), e.mods.shift());
+                        self.fix_scroll();
                         ctx.request_paint()
                     }
                 }
                 ctx.request_focus()
             }
             _ => {}
-        }
-
-        let cursor_row = self.buffer.row();
-        if self.buffer.rope().len_lines() <= SCROLL_GAP * 2 {
-            self.scroll_line = 0;
-        } else if cursor_row.saturating_sub(SCROLL_GAP) < self.scroll_line {
-            self.scroll_line = cursor_row.saturating_sub(SCROLL_GAP)
-        } else if cursor_row.saturating_add(SCROLL_GAP) > self.last_line_painted {
-            self.scroll_line = cursor_row
-                .saturating_add(SCROLL_GAP)
-                .saturating_sub(self.last_line_painted.saturating_sub(self.scroll_line))
         }
 
         if let Ok(data) = lsp_try_recv(data.root_path.uri(), LspLang::Rust) {
@@ -338,7 +342,6 @@ impl Widget<AppState> for TextEditor {
         let cursor_row = self.buffer.row();
 
         let mut line_numbers_layouts = Vec::new();
-        let mut y = HALF_LINE_SPACING;
         self.last_line_painted = 0;
         for n in self.scroll_line..rope.len_lines() {
             let style = if n == cursor_row {
@@ -347,7 +350,6 @@ impl Widget<AppState> for TextEditor {
                 THEME.scope("ui.linenr")
             };
             let layout = text_layout(ctx, env, &format!("{}", n + 1), &style);
-            y += layout.size().height + LINE_SPACING;
             line_numbers_layouts.push(layout);
         }
 
@@ -521,7 +523,7 @@ pub struct Cut {
     pub style: Style,
 }
 
-fn text_layout(ctx: &mut PaintCtx, _env: &Env, text: &str, style: &Style) -> D2DTextLayout {
+pub fn text_layout(ctx: &mut PaintCtx, _env: &Env, text: &str, style: &Style) -> D2DTextLayout {
     let mut builder = ctx
         .text()
         .new_text_layout(text.to_string())

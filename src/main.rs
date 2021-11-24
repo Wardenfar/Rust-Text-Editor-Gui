@@ -2,12 +2,13 @@ extern crate druid;
 
 use std::ops::Sub;
 
-use druid::widget::{Flex, Label, Padding, Painter};
+use druid::widget::{Flex, Label, Padding, Painter, Split};
 use druid::*;
 use ste_lib::{AppState, EDITOR_FONT, FONT, FS};
 
 use ste_lib::editor::TextEditor;
 use ste_lib::fs::FileSystem;
+use ste_lib::tree::TreeViewer;
 
 const WINDOW_TITLE: LocalizedString<AppState> = LocalizedString::new("Hello World!");
 
@@ -48,7 +49,11 @@ fn build_root_widget() -> impl Widget<AppState> {
         .with_child(button)
         .with_default_spacer();
 
-    let layout = Flex::row().with_flex_child(layout, 1.0);
+    let tree = TreeViewer::new(FS.clone());
+
+    let layout = Split::columns(tree, layout)
+        .draggable(true)
+        .split_point(0.3);
 
     // center the two widgets in the available space
     layout.env_scope(|env: &mut druid::Env, _data: &AppState| {
