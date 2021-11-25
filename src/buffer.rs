@@ -15,7 +15,7 @@ pub enum BufferSource {
 }
 
 pub struct Buffer {
-    pub(crate) source: BufferSource,
+    pub source: BufferSource,
     rope: Rope,
     cursor: Cursor,
     version: AtomicI32,

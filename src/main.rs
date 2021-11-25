@@ -22,10 +22,13 @@ async fn main() -> anyhow::Result<()> {
     let root = FS.path("./data/example");
 
     // create the initial app state
-    let initial_state = AppState {
+    let mut initial_state = AppState {
         root_path: root,
-        file_path: Some(FS.path("./data/example/src/main.rs")),
+        current: None,
+        opened: vec![],
     };
+
+    initial_state.open(FS.path("./data/example/src/main.rs"));
 
     // start the application
     AppLauncher::with_window(main_window)
@@ -120,7 +123,7 @@ impl AppDelegate<AppState> for Delegate {
     ) -> Handled {
         if let Some(file_info) = cmd.get(commands::OPEN_FILE) {
             if let Some(path) = file_info.path().to_str() {
-                data.file_path = Some(FS.path(path));
+                data.open(FS.path(path));
             }
             Handled::Yes
         } else {

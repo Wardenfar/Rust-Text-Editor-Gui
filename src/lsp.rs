@@ -19,6 +19,7 @@ const ID_COMPLETION_RESOLVE: u64 = 2;
 #[derive(Debug, Clone, Hash, Eq, PartialEq)]
 pub enum LspLang {
     Rust,
+    PlainText,
 }
 
 impl LspLang {
@@ -29,35 +30,32 @@ impl LspLang {
         }
     }
 
-    pub fn cmd(&self) -> Command {
+    pub fn cmd(&self) -> Option<Command> {
         match self {
             LspLang::Rust => {
                 let mut cmd = std::process::Command::new("rustup");
-                cmd.args([
-                    "run",
-                    "nightly",
-                    "rust-analyzer",
-                    "-v",
-                    "-v",
-                    "-v",
-                    "--no-log-buffering",
-                    "--log-file",
-                    "logs.txt",
-                ]);
-                cmd
+                cmd.args(["run", "nightly", "rust-analyzer"]);
+                Some(cmd)
             }
+            _ => None,
         }
     }
 }
 
 pub fn lsp_send(root_path: Url, lang: LspLang, input: LspInput) {
     let mut lsp = LSP.lock().unwrap();
-    lsp.get(root_path, lang).input_channel.send(input).unwrap();
+    if let Some(client) = lsp.get(root_path, lang) {
+        client.input_channel.send(input).unwrap()
+    }
 }
 
 pub fn lsp_try_recv(root_path: Url, lang: LspLang) -> Result<LspOutput, TryRecvError> {
     let mut lsp = LSP.lock().unwrap();
-    lsp.get(root_path, lang).output_channel.try_recv()
+    if let Some(client) = lsp.get(root_path, lang) {
+        client.output_channel.try_recv()
+    } else {
+        Err(TryRecvError::Empty)
+    }
 }
 
 #[derive(Default)]
@@ -66,11 +64,17 @@ pub struct LspSystem {
 }
 
 impl LspSystem {
-    pub fn get(&mut self, root_path: Url, lang: LspLang) -> &mut LspClient {
+    pub fn get(&mut self, root_path: Url, lang: LspLang) -> Option<&mut LspClient> {
         let key = (root_path.clone(), lang.clone());
-        self.clients
-            .entry(key)
-            .or_insert_with(|| LspClient::new(root_path.clone(), lang.cmd()).unwrap())
+        if let Some(cmd) = lang.cmd() {
+            let client = self
+                .clients
+                .entry(key)
+                .or_insert_with(|| LspClient::new(root_path.clone(), cmd).unwrap());
+            Some(client)
+        } else {
+            None
+        }
     }
 }
 
@@ -101,7 +105,7 @@ pub enum LspInput {
         content: String,
     },
     CloseFile {
-        url: Url,
+        uri: Url,
     },
 }
 
@@ -301,7 +305,16 @@ impl LspClient {
                         .await
                         .unwrap();
                     }
-                    LspInput::CloseFile { .. } => {}
+                    LspInput::CloseFile { uri } => {
+                        let close = lsp_types::DidCloseTextDocumentParams {
+                            text_document: TextDocumentIdentifier { uri },
+                        };
+                        send_notify_async::<_, lsp_types::notification::DidCloseTextDocument>(
+                            &mut stdin, close,
+                        )
+                        .await
+                        .unwrap();
+                    }
                     LspInput::Edit {
                         version: v, text, ..
                     } => {

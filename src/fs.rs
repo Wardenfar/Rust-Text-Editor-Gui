@@ -1,8 +1,9 @@
 use std::fs::{File as StdFile, File};
 use std::path::PathBuf;
 
+use crate::lsp::LspLang;
 use crate::tree::{ItemStyle, ShouldRepaint, Tree};
-use crate::{AppState, THEME};
+use crate::AppState;
 use druid::{Data, KbKey};
 use lsp_types::Url;
 
@@ -17,6 +18,9 @@ pub struct LocalPath {
 impl LocalPath {
     pub fn file_name(&self) -> String {
         self.inner.file_name().unwrap().to_str().unwrap().into()
+    }
+    pub fn extension(&self) -> Option<String> {
+        self.inner.extension().map(|e| e.to_str().unwrap().into())
     }
 }
 
@@ -56,6 +60,17 @@ impl FileSystem for LocalFs {
 impl Path for LocalPath {
     type Reader = File;
 
+    fn lsp_lang(&self) -> LspLang {
+        if let Some(ext) = self.extension() {
+            match ext.as_str() {
+                "rs" => LspLang::Rust,
+                _ => LspLang::PlainText,
+            }
+        } else {
+            LspLang::PlainText
+        }
+    }
+
     fn name(&self) -> String {
         self.inner.file_name().unwrap().to_str().unwrap().into()
     }
@@ -86,6 +101,7 @@ pub trait FileSystem {
 pub trait Path {
     type Reader;
 
+    fn lsp_lang(&self) -> LspLang;
     fn name(&self) -> String;
     fn path(&self) -> String;
     fn uri(&self) -> Url;
@@ -129,7 +145,7 @@ impl Tree for LocalFs {
         key: &KbKey,
     ) -> ShouldRepaint {
         if key == &KbKey::Enter && selected.inner.is_file() {
-            data.file_path = Some(selected.clone());
+            data.open(selected.clone());
             true
         } else {
             false

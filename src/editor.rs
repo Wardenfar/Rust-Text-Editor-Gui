@@ -32,7 +32,11 @@ impl TextEditor {
     fn do_action(&mut self, action: Action, data: &mut AppState) -> bool {
         let lsp_input = self.buffer.do_action(action);
         if let Some(lsp_input) = lsp_input {
-            lsp_send(data.root_path.uri(), LspLang::Rust, lsp_input);
+            lsp_send(
+                data.root_path.uri(),
+                data.curr().unwrap().lsp_lang(),
+                lsp_input,
+            );
         }
         true
     }
@@ -77,7 +81,7 @@ impl TextEditor {
 
         lsp_send(
             root_path,
-            LspLang::Rust,
+            path.lsp_lang(),
             LspInput::OpenFile {
                 uri,
                 content: self.buffer.text().into(),
@@ -171,7 +175,7 @@ impl Widget<AppState> for TextEditor {
                         if let BufferSource::File { uri } = &self.buffer.source {
                             lsp_send(
                                 data.root_path.uri(),
-                                LspLang::Rust,
+                                data.curr().unwrap().lsp_lang(),
                                 LspInput::RequestCompletion {
                                     uri: uri.clone(),
                                     row: self.buffer.row() as u32,
@@ -190,7 +194,7 @@ impl Widget<AppState> for TextEditor {
                         if let Some(c) = c {
                             lsp_send(
                                 data.root_path.uri(),
-                                LspLang::Rust,
+                                data.curr().unwrap().lsp_lang(),
                                 LspInput::RequestCompletionResolve {
                                     item: c.original_item,
                                 },
@@ -260,7 +264,7 @@ impl Widget<AppState> for TextEditor {
             _ => {}
         }
 
-        if let Ok(data) = lsp_try_recv(data.root_path.uri(), LspLang::Rust) {
+        if let Ok(data) = lsp_try_recv(data.root_path.uri(), data.curr().unwrap().lsp_lang()) {
             match data {
                 LspOutput::Completion(completions) => {
                     self.buffer.completions = completions;
@@ -302,8 +306,8 @@ impl Widget<AppState> for TextEditor {
     ) {
         match event {
             LifeCycle::WidgetAdded => {
-                if let Some(path) = &data.file_path {
-                    self.read_file(data.root_path.uri(), path);
+                if let Some(path) = data.curr() {
+                    self.read_file(data.root_path.uri(), &path);
                 }
             }
             _ => {}
@@ -311,8 +315,8 @@ impl Widget<AppState> for TextEditor {
     }
 
     fn update(&mut self, ctx: &mut UpdateCtx, old_data: &AppState, data: &AppState, _env: &Env) {
-        if old_data.file_path != data.file_path {
-            if let Some(path) = &data.file_path {
+        if old_data.curr() != data.curr() {
+            if let Some(path) = &data.curr() {
                 self.read_file(data.root_path.uri(), path);
                 ctx.request_paint();
             }

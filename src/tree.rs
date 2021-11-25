@@ -1,6 +1,5 @@
 use crate::editor::{text_layout, HALF_LINE_SPACING, LINE_SPACING};
-use crate::theme::Style;
-use crate::{AppState, Theme, THEME};
+use crate::{AppState, THEME};
 use druid::piet::TextLayout;
 use druid::{
     BoxConstraints, Env, Event, EventCtx, KbKey, LayoutCtx, LifeCycle, LifeCycleCtx, PaintCtx,
