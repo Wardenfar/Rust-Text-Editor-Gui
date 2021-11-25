@@ -19,7 +19,7 @@
 "function" = { fg = "green1", modifiers = ["bold"] }
 "function.macro" = "aqua1"
 "function.builtin" = "yellow1"
-"comment" = { fg = "gray1", modifiers = ["italic"]  }
+"comment" = { fg = "gray1", modifiers = ["italic"] }
 "constant" = { fg = "purple1" }
 "constant.builtin" = { fg = "purple1", modifiers = ["bold"] }
 "string" = "green1"
@@ -33,9 +33,9 @@
 "info" = { fg = "aqua1", bg = "bg1" }
 "hint" = { fg = "blue1", bg = "bg1" }
 
-"tree.file" = { fg = "gray0" }
-"tree.dir" = { fg = "yellow0" }
-"tree.selected" = { fg = "yellow1" }
+"tree.file" = { fg = "gray0", font = "Segoe UI", size = 16.0 }
+"tree.dir" = { fg = "yellow0", font = "Segoe UI", size = 16.0 }
+"tree.selected" = { fg = "yellow1", bg = "bg1", font = "Segoe UI", size = 16.0 }
 
 "ui.background" = { bg = "bg0" }
 "ui.linenr" = { fg = "bg4" }

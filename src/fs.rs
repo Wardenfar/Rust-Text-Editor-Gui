@@ -1,9 +1,9 @@
 use std::fs::{File as StdFile, File};
 use std::path::PathBuf;
 
-use crate::tree::{ItemStyle, Tree};
+use crate::tree::{ItemStyle, ShouldRepaint, Tree};
 use crate::{AppState, THEME};
-use druid::Data;
+use druid::{Data, KbKey};
 use lsp_types::Url;
 
 #[derive(Default, Clone, Eq, PartialEq, Ord, PartialOrd)]
@@ -12,6 +12,12 @@ pub struct LocalFs {}
 #[derive(Clone, Eq, PartialEq, Ord, PartialOrd)]
 pub struct LocalPath {
     inner: PathBuf,
+}
+
+impl LocalPath {
+    pub fn file_name(&self) -> String {
+        self.inner.file_name().unwrap().to_str().unwrap().into()
+    }
 }
 
 impl Data for LocalPath {
@@ -94,22 +100,39 @@ impl Tree for LocalFs {
     }
 
     fn children(&self, _data: &AppState, parent: &Self::Key) -> Vec<Self::Key> {
-        self.list(parent.clone())
+        let mut list = self.list(parent.clone());
+        list.sort_by_key(|k| k.file_name());
+        list.sort_by_key(|k| if k.inner.is_dir() { 1 } else { 2 });
+        list
     }
 
     fn refresh(&self, _data: &AppState, _parent: &Self::Key) {}
 
     fn item(&self, data: &AppState, key: &Self::Key) -> ItemStyle {
         let level = key.inner.components().count() - data.root_path.inner.components().count();
-        let style = if key.inner.is_dir() {
-            THEME.scope("tree.dir")
+        let style_scope = if key.inner.is_dir() {
+            "tree.dir"
         } else {
-            THEME.scope("tree.file")
+            "tree.file"
         };
         ItemStyle {
-            text: key.inner.file_name().unwrap().to_str().unwrap().into(),
-            style,
+            text: key.file_name(),
+            style_scope: style_scope.into(),
             level,
+        }
+    }
+
+    fn key_down(
+        &mut self,
+        data: &mut AppState,
+        selected: &Self::Key,
+        key: &KbKey,
+    ) -> ShouldRepaint {
+        if key == &KbKey::Enter && selected.inner.is_file() {
+            data.file_path = Some(selected.clone());
+            true
+        } else {
+            false
         }
     }
 }
