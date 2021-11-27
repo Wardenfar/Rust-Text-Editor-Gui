@@ -1,10 +1,10 @@
 use rand::Rng;
 use std::io::Cursor;
-use ste_lib::buffer::{Action, Buffer, BufferSource, Movement};
+use ste_lib::buffer::{Action, Buffer, Movement};
 
 #[test]
 fn fuzz() {
-    let mut buffer = Buffer::from_reader(Cursor::new(String::new()), BufferSource::Text);
+    let mut buffer = Buffer::from_reader(1, Cursor::new(String::new()));
 
     let mut rng = rand::thread_rng();
 

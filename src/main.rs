@@ -19,20 +19,13 @@ async fn main() -> anyhow::Result<()> {
         .title(WINDOW_TITLE)
         .window_size((600.0, 450.0));
 
-    let root = FS.path("./data/example");
+    let _root = FS.path("./data/example");
 
     // create the initial app state
-    let mut initial_state = AppState {
-        root_path: root,
-        current: None,
-        opened: vec![],
-    };
-
-    initial_state.open(FS.path("./data/example/src/main.rs"));
+    let initial_state = AppState {};
 
     // start the application
     AppLauncher::with_window(main_window)
-        .delegate(Delegate)
         .launch(initial_state)
         .expect("Failed to launch application");
 
@@ -108,26 +101,4 @@ where
 fn editor() -> impl Widget<AppState> {
     let editor = TextEditor::new();
     editor
-}
-
-struct Delegate;
-
-impl AppDelegate<AppState> for Delegate {
-    fn command(
-        &mut self,
-        _ctx: &mut DelegateCtx,
-        _target: Target,
-        cmd: &Command,
-        data: &mut AppState,
-        _env: &Env,
-    ) -> Handled {
-        if let Some(file_info) = cmd.get(commands::OPEN_FILE) {
-            if let Some(path) = file_info.path().to_str() {
-                data.open(FS.path(path));
-            }
-            Handled::Yes
-        } else {
-            Handled::No
-        }
-    }
 }

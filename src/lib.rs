@@ -1,5 +1,7 @@
-use crate::fs::{LocalPath, Path};
-use druid::{Data, FontDescriptor, Key, Lens};
+use crate::fs::{FileSystem, LocalPath, Path};
+use druid::{Data, FontDescriptor, Key};
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicU32, Ordering};
 
 pub mod buffer;
 pub mod editor;
@@ -9,7 +11,9 @@ pub mod lsp;
 pub mod theme;
 pub mod tree;
 
-use crate::lsp::{lsp_send, LspInput};
+use crate::buffer::Buffer;
+use crate::lsp::{lsp_send_with_lang, LspInput, LspLang};
+use anyhow::Context;
 use fs::LocalFs;
 use lsp::LspSystem;
 use std::sync::Mutex;
@@ -22,54 +26,152 @@ lazy_static::lazy_static! {
     pub static ref THEME: Theme = toml::from_str(include_str!("../runtime/themes/gruvbox.toml")).unwrap();
     pub static ref FS: LocalFs = LocalFs::default();
     pub static ref LSP: Mutex<LspSystem> = Mutex::new(LspSystem::default());
+    pub static ref BUFFERS: Mutex<Buffers> = Mutex::new(Buffers::default());
+    pub static ref GLOBAL: Mutex<Global> = Mutex::new(Global {
+        root_path: FS.path("./data/example")
+    });
 }
 
-#[derive(Clone, Lens)]
-pub struct AppState {
+#[macro_export]
+macro_rules! lock {
+    (buffers) => {{
+        // println!("{} {}", file!(), line!());
+        crate::BUFFERS.lock().unwrap()
+    }};
+}
+
+#[macro_export]
+macro_rules! curr_buf {
+    (row) => {{
+        let buffers = lock!(buffers);
+        buffers.get_curr()?.buffer.row()
+    }};
+    (col) => {{
+        let buffers = lock!(buffers);
+        buffers.get_curr()?.buffer.col()
+    }};
+    (id) => {{
+        let buffers = lock!(buffers);
+        buffers.curr()?
+    }};
+    (text) => {{
+        let buffers = lock!(buffers);
+        buffers.get_curr()?.buffer.text()
+    }};
+    (cursor) => {{
+        let buffers = lock!(buffers);
+        buffers.get_curr()?.buffer.cursor()
+    }};
+}
+
+#[derive(Clone, Data)]
+pub struct AppState;
+
+pub struct Global {
     pub root_path: LocalPath,
-    pub current: Option<LocalPath>,
-    pub opened: Vec<LocalPath>,
 }
 
-impl Data for AppState {
-    fn same(&self, other: &Self) -> bool {
-        self.root_path.same(&other.root_path) && self.current.same(&other.current)
-    }
+pub struct Buffers {
+    counter: AtomicU32,
+    pub current: Option<u32>,
+    pub buffers: HashMap<u32, BufferData>,
 }
 
-impl AppState {
-    pub fn curr(&self) -> Option<LocalPath> {
-        self.current.clone()
-    }
-
-    pub fn open(&mut self, path: LocalPath) {
-        self.current = Some(path.clone());
-        if !self.opened.contains(&path) {
-            self.opened.push(path);
+impl Default for Buffers {
+    fn default() -> Self {
+        Self {
+            counter: AtomicU32::new(1),
+            current: None,
+            buffers: Default::default(),
         }
     }
+}
 
-    pub fn close(&mut self, path: LocalPath) {
-        let pos = self.opened.iter().position(|o| o == &path);
-        if let Some(pos) = pos {
-            self.opened.remove(pos);
+impl Buffers {
+    pub fn curr(&self) -> anyhow::Result<u32> {
+        self.current.context("no current")
+    }
 
-            lsp_send(
-                self.root_path.uri(),
-                path.lsp_lang(),
-                LspInput::CloseFile { uri: path.uri() },
-            );
-
-            if self.current.is_some() {
-                if self.opened.is_empty() {
-                    self.current = None;
-                } else {
-                    let curr = self.curr().unwrap();
-                    if curr == path {
-                        self.current = self.opened.get(0).cloned()
-                    }
+    pub fn open_file(&mut self, path: LocalPath) -> anyhow::Result<u32> {
+        for (id, b) in &self.buffers {
+            if let BufferSource::File { path: p } = &b.source {
+                if &path == p {
+                    self.current = Some(*id);
+                    return Ok(*id);
                 }
             }
         }
+
+        let id = self.new_id();
+
+        let source = BufferSource::File { path: path.clone() };
+
+        let data = BufferData {
+            source,
+            lsp_lang: path.lsp_lang(),
+            read_only: false,
+            modified: false,
+            buffer: Buffer::from_reader(id, path.reader()),
+        };
+
+        let text = data.buffer.text();
+
+        self.buffers.insert(id, data);
+
+        self.current = Some(id);
+
+        lsp_send_with_lang(
+            path.lsp_lang(),
+            LspInput::OpenFile {
+                uri: path.uri(),
+                content: text,
+            },
+        )?;
+
+        Ok(id)
     }
+
+    pub fn new_id(&self) -> u32 {
+        self.counter.fetch_add(1, Ordering::SeqCst)
+    }
+
+    pub fn get(&self, id: u32) -> anyhow::Result<&BufferData> {
+        self.buffers.get(&id).context("no buffer")
+    }
+
+    pub fn get_curr(&self) -> anyhow::Result<&BufferData> {
+        let id = self.curr()?;
+        self.buffers.get(&id).context("no buffer")
+    }
+
+    pub fn get_mut(&mut self, id: u32) -> anyhow::Result<&mut BufferData> {
+        self.buffers.get_mut(&id).context("no buffer")
+    }
+
+    pub fn get_mut_curr(&mut self) -> anyhow::Result<&mut BufferData> {
+        let id = self.curr()?;
+        self.buffers.get_mut(&id).context("no buffer")
+    }
+}
+
+pub enum BufferSource {
+    Text,
+    File { path: LocalPath },
+}
+
+impl BufferSource {
+    pub fn path(&self) -> Option<LocalPath> {
+        match self {
+            BufferSource::Text => None,
+            BufferSource::File { path } => Some(path.clone()),
+        }
+    }
+}
+
+pub struct BufferData {
+    pub source: BufferSource,
+    pub lsp_lang: LspLang,
+    pub read_only: bool,
+    pub modified: bool,
+    pub buffer: Buffer,
 }

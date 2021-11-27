@@ -3,7 +3,7 @@ use std::path::PathBuf;
 
 use crate::lsp::LspLang;
 use crate::tree::{ItemStyle, ShouldRepaint, Tree};
-use crate::AppState;
+use crate::{lock, GLOBAL};
 use druid::{Data, KbKey};
 use lsp_types::Url;
 
@@ -111,21 +111,22 @@ pub trait Path {
 impl Tree for LocalFs {
     type Key = LocalPath;
 
-    fn root(&self, data: &AppState) -> Self::Key {
-        data.root_path.clone()
+    fn root(&self) -> Self::Key {
+        let global = GLOBAL.lock().unwrap();
+        global.root_path.clone()
     }
 
-    fn children(&self, _data: &AppState, parent: &Self::Key) -> Vec<Self::Key> {
+    fn children(&self, parent: &Self::Key) -> Vec<Self::Key> {
         let mut list = self.list(parent.clone());
         list.sort_by_key(|k| k.file_name());
         list.sort_by_key(|k| if k.inner.is_dir() { 1 } else { 2 });
         list
     }
 
-    fn refresh(&self, _data: &AppState, _parent: &Self::Key) {}
+    fn refresh(&self, _parent: &Self::Key) {}
 
-    fn item(&self, data: &AppState, key: &Self::Key) -> ItemStyle {
-        let level = key.inner.components().count() - data.root_path.inner.components().count();
+    fn item(&self, key: &Self::Key) -> ItemStyle {
+        let level = key.inner.components().count() - self.root().inner.components().count();
         let style_scope = if key.inner.is_dir() {
             "tree.dir"
         } else {
@@ -138,14 +139,10 @@ impl Tree for LocalFs {
         }
     }
 
-    fn key_down(
-        &mut self,
-        data: &mut AppState,
-        selected: &Self::Key,
-        key: &KbKey,
-    ) -> ShouldRepaint {
+    fn key_down(&mut self, selected: &Self::Key, key: &KbKey) -> ShouldRepaint {
         if key == &KbKey::Enter && selected.inner.is_file() {
-            data.open(selected.clone());
+            let mut buffers = lock!(buffers);
+            buffers.open_file(selected.clone()).unwrap();
             true
         } else {
             false

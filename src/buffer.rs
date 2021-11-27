@@ -4,21 +4,16 @@ use std::io::Read;
 use std::ops::RangeBounds;
 use std::sync::atomic::{AtomicI32, Ordering};
 
-use lsp_types::{Position, Range, Url};
+use lsp_types::{Position, Range};
 use ropey::Rope;
 
 use crate::lsp::{CompletionData, LspCompletion, LspInput};
 
-pub enum BufferSource {
-    Text,
-    File { uri: Url },
-}
-
 pub struct Buffer {
-    pub source: BufferSource,
+    id: u32,
     rope: Rope,
     cursor: Cursor,
-    version: AtomicI32,
+    pub version: AtomicI32,
     pub completions: Vec<LspCompletion>,
 }
 
@@ -137,13 +132,13 @@ impl Buffer {
             .collect()
     }
 
-    pub fn from_reader<R: Read>(reader: R, src: BufferSource) -> Self {
+    pub fn from_reader<R: Read>(id: u32, reader: R) -> Self {
         Self {
+            id,
             rope: Rope::from_reader(reader).unwrap(),
             cursor: Cursor { head: 0, tail: 0 },
             version: Default::default(),
             completions: vec![],
-            source: src,
         }
     }
 
@@ -303,10 +298,10 @@ impl Buffer {
 
         self.rope.remove(start..end);
 
-        self.lsp_edit()
+        Some(self.lsp_edit())
     }
 
-    pub fn insert<I: IntoWithBuffer<Index>>(&mut self, start: I, chars: &str) -> Option<LspInput> {
+    pub fn insert<I: IntoWithBuffer<Index>>(&mut self, start: I, chars: &str) -> LspInput {
         let start = start.into_with_buf(self);
 
         let curr = self.cursor.head;
@@ -324,15 +319,11 @@ impl Buffer {
         self.lsp_edit()
     }
 
-    fn lsp_edit(&mut self) -> Option<LspInput> {
-        if let BufferSource::File { uri } = &self.source {
-            Some(LspInput::Edit {
-                uri: uri.clone(),
-                version: self.version.fetch_add(1, Ordering::SeqCst),
-                text: self.text().to_string(),
-            })
-        } else {
-            None
+    fn lsp_edit(&mut self) -> LspInput {
+        LspInput::Edit {
+            buffer_id: self.id,
+            version: self.version.fetch_add(1, Ordering::SeqCst),
+            text: self.text().to_string(),
         }
     }
 
@@ -343,7 +334,7 @@ impl Buffer {
                     let bounds = (self.cursor.min(), self.cursor.max());
                     self.remove_chars(bounds);
                 }
-                self.insert(self.cursor.head, chars.as_str())
+                Some(self.insert(self.cursor.head, chars.as_str()))
             }
             Action::Backspace => {
                 if self.cursor.head != self.cursor.tail {
@@ -379,11 +370,11 @@ impl Buffer {
 mod tests {
     use std::io::Cursor;
 
-    use crate::buffer::{Action, Buffer, BufferSource, Movement};
+    use crate::buffer::{Action, Buffer, Movement};
 
     #[test]
     fn selection() {
-        let mut buf = Buffer::from_reader(Cursor::new("test"), BufferSource::Text);
+        let mut buf = Buffer::from_reader(1, Cursor::new("test"));
         buf.move_cursor(Movement::Right, true);
         buf.move_cursor(Movement::Right, true);
         buf.do_action(Action::Insert("as".into()));
@@ -393,7 +384,7 @@ mod tests {
 
     #[test]
     fn edit() {
-        let mut buf = Buffer::from_reader(Cursor::new("test"), BufferSource::Text);
+        let mut buf = Buffer::from_reader(1, Cursor::new("test"));
         buf.insert(1, "yay");
         assert_eq!(buf.text(), "tyayest");
         buf.remove_chars((1, 5));
@@ -405,7 +396,7 @@ mod tests {
     #[test]
     fn bounds_3() {
         let input = "{\na}";
-        let buf = Buffer::from_reader(Cursor::new(input), BufferSource::Text);
+        let buf = Buffer::from_reader(1, Cursor::new(input));
         assert_eq!(buf.line_bounds(0), (0, 1));
         assert_eq!(buf.line_bounds(1), (2, 4));
     }
@@ -422,7 +413,7 @@ c
         .trim()
         .to_string();
 
-        let buf = Buffer::from_reader(Cursor::new(str), BufferSource::Text);
+        let buf = Buffer::from_reader(1, Cursor::new(str));
         let b = buf.line_bounds(0);
         assert_eq!(buf.rope.slice(b.0..b.1).as_str().unwrap(), "a");
         let b = buf.line_bounds(1);
@@ -445,8 +436,7 @@ c
         "#
         .trim()
         .to_string();
-
-        let buf = Buffer::from_reader(Cursor::new(str), BufferSource::Text);
+        let buf = Buffer::from_reader(1, Cursor::new(str));
         let b = buf.line_bounds(0);
         assert_eq!(buf.rope.slice(b.0..b.1).as_str().unwrap(), "{");
         let b = buf.line_bounds(1);
@@ -473,7 +463,7 @@ xyzefv
         .trim()
         .to_string();
 
-        let mut b = Buffer::from_reader(Cursor::new(str), BufferSource::Text);
+        let mut b = Buffer::from_reader(1, Cursor::new(str));
         assert_eq!(b.cursor().head, 0);
         b.move_cursor(Movement::Right, false);
         assert_eq!(b.cursor().head, 1);

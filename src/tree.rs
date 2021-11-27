@@ -10,12 +10,11 @@ pub type ShouldRepaint = bool;
 
 pub trait Tree {
     type Key: Clone + PartialEq;
-    fn root(&self, data: &AppState) -> Self::Key;
-    fn children(&self, data: &AppState, parent: &Self::Key) -> Vec<Self::Key>;
-    fn refresh(&self, data: &AppState, parent: &Self::Key);
-    fn item(&self, data: &AppState, key: &Self::Key) -> ItemStyle;
-    fn key_down(&mut self, data: &mut AppState, selected: &Self::Key, key: &KbKey)
-        -> ShouldRepaint;
+    fn root(&self) -> Self::Key;
+    fn children(&self, parent: &Self::Key) -> Vec<Self::Key>;
+    fn refresh(&self, parent: &Self::Key);
+    fn item(&self, key: &Self::Key) -> ItemStyle;
+    fn key_down(&mut self, selected: &Self::Key, key: &KbKey) -> ShouldRepaint;
 }
 
 pub struct ItemStyle {
@@ -45,7 +44,7 @@ impl<T: Tree> TreeViewer<T> {
 }
 
 impl<T: Tree> Widget<AppState> for TreeViewer<T> {
-    fn event(&mut self, ctx: &mut EventCtx, event: &Event, data: &mut AppState, _env: &Env) {
+    fn event(&mut self, ctx: &mut EventCtx, event: &Event, _data: &mut AppState, _env: &Env) {
         if let Event::KeyDown(e) = event {
             match &e.key {
                 KbKey::Character(s) => match s.as_str() {
@@ -94,7 +93,7 @@ impl<T: Tree> Widget<AppState> for TreeViewer<T> {
                 key => {
                     if self.selected.is_some() {
                         let selected = self.selected.as_ref().unwrap();
-                        let repaint = self.tree.key_down(data, selected, key);
+                        let repaint = self.tree.key_down(selected, key);
                         if repaint {
                             ctx.request_paint();
                         }
@@ -110,12 +109,12 @@ impl<T: Tree> Widget<AppState> for TreeViewer<T> {
         &mut self,
         _ctx: &mut LifeCycleCtx,
         event: &LifeCycle,
-        data: &AppState,
+        _data: &AppState,
         _env: &Env,
     ) {
         match event {
             LifeCycle::WidgetAdded => {
-                self.selected = Some(self.tree.root(data));
+                self.selected = Some(self.tree.root());
             }
             _ => {}
         }
@@ -140,13 +139,13 @@ impl<T: Tree> Widget<AppState> for TreeViewer<T> {
         ctx.clip(rect.clone());
         ctx.fill(rect, &THEME.scope("ui.background").bg());
 
-        let root = self.tree.root(data);
+        let root = self.tree.root();
         let items = self.displayed(data, &root);
 
         let mut y = HALF_LINE_SPACING;
 
         for key in items.iter().skip(self.scroll) {
-            let item = self.tree.item(data, key);
+            let item = self.tree.item(key);
 
             let mut style = THEME.scope(&item.style_scope);
             let mut bg = None;
@@ -192,7 +191,7 @@ impl<T: Tree> TreeViewer<T> {
         if !self.opened.contains(curr) {
             return result;
         }
-        for c in self.tree.children(data, &curr) {
+        for c in self.tree.children(&curr) {
             result.extend(self.displayed(data, &c));
         }
         result

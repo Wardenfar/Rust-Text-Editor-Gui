@@ -2,15 +2,18 @@ use std::collections::HashMap;
 use std::io::Write;
 use std::process;
 use std::process::Command;
+use std::sync::atomic::Ordering;
 
-use crate::LSP;
 use anyhow::Context;
 use jsonrpc_core::id::Id;
 use jsonrpc_core::Output;
 use lsp_types::*;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use tokio::process::ChildStdin;
 use tokio::sync::mpsc;
-use tokio::sync::mpsc::error::TryRecvError;
+
+
+use crate::{lock, Path, GLOBAL, LSP};
 
 const ID_INIT: u64 = 0;
 const ID_COMPLETION: u64 = 1;
@@ -42,20 +45,46 @@ impl LspLang {
     }
 }
 
-pub fn lsp_send(root_path: Url, lang: LspLang, input: LspInput) {
+pub fn lsp_send(buffer_id: u32, input: LspInput) -> anyhow::Result<()> {
+    let global = GLOBAL.lock().unwrap();
+    let root_path = &global.root_path;
+
+    let buffers = lock!(buffers);
+    let buffer = buffers.get(buffer_id)?;
+
     let mut lsp = LSP.lock().unwrap();
-    if let Some(client) = lsp.get(root_path, lang) {
-        client.input_channel.send(input).unwrap()
-    }
+    let client = lsp
+        .get(root_path.uri(), &buffer.lsp_lang)
+        .context("no lsp client")?;
+    client.input_channel.send(input)?;
+    Ok(())
 }
 
-pub fn lsp_try_recv(root_path: Url, lang: LspLang) -> Result<LspOutput, TryRecvError> {
+pub fn lsp_send_with_lang(lsp_lang: LspLang, input: LspInput) -> anyhow::Result<()> {
+    let global = GLOBAL.lock().unwrap();
+    let root_path = &global.root_path;
+
     let mut lsp = LSP.lock().unwrap();
-    if let Some(client) = lsp.get(root_path, lang) {
-        client.output_channel.try_recv()
-    } else {
-        Err(TryRecvError::Empty)
-    }
+    let client = lsp
+        .get(root_path.uri(), &lsp_lang)
+        .context("no lsp client")?;
+    client.input_channel.send(input)?;
+    Ok(())
+}
+
+pub fn lsp_try_recv(buffer_id: u32) -> anyhow::Result<LspOutput> {
+    let global = GLOBAL.lock().unwrap();
+    let root_path = &global.root_path;
+
+    let buffers = lock!(buffers);
+    let buffer = buffers.get(buffer_id)?;
+
+    let mut lsp = LSP.lock().unwrap();
+    let client = lsp
+        .get(root_path.uri(), &buffer.lsp_lang)
+        .context("no lsp client found")?;
+    let result = client.output_channel.try_recv()?;
+    Ok(result)
 }
 
 #[derive(Default)]
@@ -64,7 +93,7 @@ pub struct LspSystem {
 }
 
 impl LspSystem {
-    pub fn get(&mut self, root_path: Url, lang: LspLang) -> Option<&mut LspClient> {
+    pub fn get(&mut self, root_path: Url, lang: &LspLang) -> Option<&mut LspClient> {
         let key = (root_path.clone(), lang.clone());
         if let Some(cmd) = lang.cmd() {
             let client = self
@@ -88,16 +117,17 @@ pub struct LspClient {
 #[derive(Debug)]
 pub enum LspInput {
     Edit {
-        uri: Url,
+        buffer_id: u32,
         version: i32,
         text: String,
     },
     RequestCompletion {
-        uri: Url,
+        buffer_id: u32,
         row: u32,
         col: u32,
     },
     RequestCompletionResolve {
+        buffer_id: u32,
         item: CompletionItem,
     },
     OpenFile {
@@ -236,91 +266,10 @@ impl LspClient {
             .await
             .unwrap();
 
-            let mut version = 0;
-            let mut edited_text = String::new();
-
             while let Some(lsp_input) = c_rx.recv().await {
-                match lsp_input {
-                    LspInput::RequestCompletion { row, col, uri: url } => {
-                        let edits = lsp_types::DidChangeTextDocumentParams {
-                            text_document: VersionedTextDocumentIdentifier {
-                                uri: url.clone(),
-                                version,
-                            },
-                            content_changes: vec![TextDocumentContentChangeEvent {
-                                range: None,
-                                range_length: None,
-                                text: edited_text.clone(),
-                            }],
-                        };
-                        send_notify_async::<_, lsp_types::notification::DidChangeTextDocument>(
-                            &mut stdin, edits,
-                        )
-                        .await
-                        .unwrap();
-                        let completion = lsp_types::CompletionParams {
-                            text_document_position: lsp_types::TextDocumentPositionParams {
-                                text_document: lsp_types::TextDocumentIdentifier { uri: url },
-                                position: lsp_types::Position {
-                                    line: row,
-                                    character: col,
-                                },
-                            },
-                            work_done_progress_params: Default::default(),
-                            partial_result_params: Default::default(),
-                            context: Some(CompletionContext {
-                                trigger_kind: CompletionTriggerKind::INVOKED,
-                                trigger_character: None,
-                            }),
-                        };
-                        send_request_async::<_, lsp_types::request::Completion>(
-                            &mut stdin,
-                            ID_COMPLETION,
-                            completion,
-                        )
-                        .await
-                        .unwrap();
-                    }
-                    LspInput::RequestCompletionResolve { item } => {
-                        send_request_async::<_, lsp_types::request::ResolveCompletionItem>(
-                            &mut stdin,
-                            ID_COMPLETION_RESOLVE,
-                            item,
-                        )
-                        .await
-                        .unwrap()
-                    }
-                    LspInput::OpenFile { uri: url, content } => {
-                        let open = lsp_types::DidOpenTextDocumentParams {
-                            text_document: lsp_types::TextDocumentItem {
-                                uri: url,
-                                language_id: "py".into(),
-                                version: 0,
-                                text: content,
-                            },
-                        };
-                        send_notify_async::<_, lsp_types::notification::DidOpenTextDocument>(
-                            &mut stdin, open,
-                        )
-                        .await
-                        .unwrap();
-                    }
-                    LspInput::CloseFile { uri } => {
-                        let close = lsp_types::DidCloseTextDocumentParams {
-                            text_document: TextDocumentIdentifier { uri },
-                        };
-                        send_notify_async::<_, lsp_types::notification::DidCloseTextDocument>(
-                            &mut stdin, close,
-                        )
-                        .await
-                        .unwrap();
-                    }
-                    LspInput::Edit {
-                        version: v, text, ..
-                    } => {
-                        version = v;
-                        edited_text = text;
-                    }
+                let r = Self::process_input(&mut stdin, lsp_input).await;
+                if let Err(e) = r {
+                    println!("{}", e);
                 }
             }
             Ok::<(), anyhow::Error>(())
@@ -375,6 +324,103 @@ impl LspClient {
             output_channel: rx,
             input_channel: c_tx,
         })
+    }
+
+    async fn process_input(mut stdin: &mut ChildStdin, lsp_input: LspInput) -> anyhow::Result<()> {
+        match lsp_input {
+            LspInput::RequestCompletion {
+                row,
+                col,
+                buffer_id,
+            } => {
+                let (path, version, text) = {
+                    let buffers = lock!(buffers);
+                    let buffer = buffers.get(buffer_id)?;
+                    (
+                        buffer.source.path().context("path")?,
+                        buffer.buffer.version.fetch_add(1, Ordering::SeqCst),
+                        buffer.buffer.text(),
+                    )
+                };
+                let url = path.uri();
+                let edits = lsp_types::DidChangeTextDocumentParams {
+                    text_document: VersionedTextDocumentIdentifier {
+                        uri: url.clone(),
+                        version,
+                    },
+                    content_changes: vec![TextDocumentContentChangeEvent {
+                        range: None,
+                        range_length: None,
+                        text,
+                    }],
+                };
+                send_notify_async::<_, lsp_types::notification::DidChangeTextDocument>(
+                    &mut stdin, edits,
+                )
+                .await?;
+                let completion = lsp_types::CompletionParams {
+                    text_document_position: lsp_types::TextDocumentPositionParams {
+                        text_document: lsp_types::TextDocumentIdentifier { uri: url },
+                        position: lsp_types::Position {
+                            line: row,
+                            character: col,
+                        },
+                    },
+                    work_done_progress_params: Default::default(),
+                    partial_result_params: Default::default(),
+                    context: Some(CompletionContext {
+                        trigger_kind: CompletionTriggerKind::INVOKED,
+                        trigger_character: None,
+                    }),
+                };
+                send_request_async::<_, lsp_types::request::Completion>(
+                    &mut stdin,
+                    ID_COMPLETION,
+                    completion,
+                )
+                .await
+                .unwrap();
+            }
+            LspInput::RequestCompletionResolve { buffer_id: _, item } => {
+                send_request_async::<_, lsp_types::request::ResolveCompletionItem>(
+                    &mut stdin,
+                    ID_COMPLETION_RESOLVE,
+                    item,
+                )
+                .await?
+            }
+            LspInput::OpenFile { uri: url, content } => {
+                let open = lsp_types::DidOpenTextDocumentParams {
+                    text_document: lsp_types::TextDocumentItem {
+                        uri: url,
+                        language_id: "py".into(),
+                        version: 0,
+                        text: content,
+                    },
+                };
+                send_notify_async::<_, lsp_types::notification::DidOpenTextDocument>(
+                    &mut stdin, open,
+                )
+                .await
+                .unwrap();
+            }
+            LspInput::CloseFile { uri } => {
+                let close = lsp_types::DidCloseTextDocumentParams {
+                    text_document: TextDocumentIdentifier { uri },
+                };
+                send_notify_async::<_, lsp_types::notification::DidCloseTextDocument>(
+                    &mut stdin, close,
+                )
+                .await
+                .unwrap();
+            }
+            LspInput::Edit {
+                version: _v,
+                text: _,
+                buffer_id: _,
+            } => {}
+        }
+        Ok(())
     }
 }
 
