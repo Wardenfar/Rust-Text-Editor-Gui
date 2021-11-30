@@ -10,75 +10,15 @@ pub struct Theme {
     styles: HashMap<String, Style>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct Style {
-    fg: Color,
-    bg: Color,
-    font_family: String,
-    font_size: f64,
-    modifiers: Vec<Modifier>,
-}
-
-impl Default for Style {
-    fn default() -> Self {
-        Style::error()
-    }
-}
-
-impl Style {
-    fn error() -> Style {
-        Style {
-            fg: Color::WHITE,
-            bg: Color::BLACK,
-            font_family: "Roboto Mono".into(),
-            font_size: 18.0,
-            modifiers: vec![],
-        }
-    }
-
-    pub fn font_family(&self) -> String {
-        self.font_family.clone()
-    }
-
-    pub fn font_size(&self) -> f64 {
-        self.font_size
-    }
-
-    pub fn fg(&self) -> Color {
-        if !self.reversed() {
-            self.fg.clone()
-        } else {
-            self.bg.clone()
-        }
-    }
-
-    pub fn bg(&self) -> Color {
-        if !self.reversed() {
-            self.bg.clone()
-        } else {
-            self.fg.clone()
-        }
-    }
-
-    pub fn bold(&self) -> bool {
-        self.modifiers.iter().any(|m| matches!(m, Modifier::BOLD))
-    }
-
-    pub fn italic(&self) -> bool {
-        self.modifiers.iter().any(|m| matches!(m, Modifier::ITALIC))
-    }
-
-    pub fn underline(&self) -> bool {
-        self.modifiers
-            .iter()
-            .any(|m| matches!(m, Modifier::UNDERLINE))
-    }
-
-    pub fn reversed(&self) -> bool {
-        self.modifiers
-            .iter()
-            .any(|m| matches!(m, Modifier::REVERSED))
-    }
+    pub foreground: Option<Color>,
+    pub background: Option<Color>,
+    pub underline: Option<bool>,
+    pub italic: Option<bool>,
+    pub bold: Option<bool>,
+    pub text_size: Option<f64>,
+    pub text_font: Option<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -86,7 +26,6 @@ pub enum Modifier {
     BOLD,
     UNDERLINE,
     ITALIC,
-    REVERSED,
 }
 
 impl<'de> Deserialize<'de> for Theme {
@@ -205,10 +144,12 @@ impl ThemePalette {
         if let Value::Table(entries) = value {
             for (name, value) in entries {
                 match name.as_str() {
-                    "fg" => style.fg = self.parse_color(value)?,
-                    "bg" => style.bg = self.parse_color(value)?,
-                    "font" => style.font_family = Self::parse_value_as_str(&value).unwrap().into(),
-                    "size" => style.font_size = value.as_float().unwrap(),
+                    "fg" => style.foreground = Some(self.parse_color(value)?),
+                    "bg" => style.background = Some(self.parse_color(value)?),
+                    "font" => {
+                        style.text_font = Some(Self::parse_value_as_str(&value).unwrap().into())
+                    }
+                    "size" => style.text_size = value.as_float(),
                     "modifiers" => {
                         let modifiers = value
                             .as_array()
@@ -216,7 +157,11 @@ impl ThemePalette {
 
                         for modifier in modifiers {
                             if let Some(m) = Self::parse_modifier(modifier) {
-                                style.modifiers.push(m)
+                                match m {
+                                    Modifier::BOLD => style.bold = Some(true),
+                                    Modifier::UNDERLINE => style.underline = Some(true),
+                                    Modifier::ITALIC => style.italic = Some(true),
+                                }
                             }
                         }
                     }
@@ -224,7 +169,7 @@ impl ThemePalette {
                 }
             }
         } else {
-            style.fg = self.parse_color(value)?;
+            style.foreground = Some(self.parse_color(value)?);
         }
         Ok(())
     }

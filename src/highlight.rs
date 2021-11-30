@@ -1,5 +1,7 @@
+use crate::buffer::Index;
+use crate::style_layer::{Span, StyleLayer};
 use crate::theme::Style;
-use crate::THEME;
+use crate::{lock, LspLang, THEME};
 use std::collections::HashMap;
 use tree_sitter::{Language, Parser, Query, QueryCursor};
 
@@ -47,21 +49,41 @@ pub struct Region {
     pub style: Style,
 }
 
-impl TreeSitterHighlight {
-    pub fn new() -> Self {
-        let parser = rust_lang();
-        let query = Query::new(
-            parser.language().unwrap(),
-            include_str!("../runtime/queries/rust/highlights.scm"),
-        )
-        .unwrap();
-        Self { parser, query }
+impl LspLang {
+    pub fn tree_sitter_lang(&self) -> Option<(Parser, &str)> {
+        match self {
+            LspLang::Json => Some((
+                json_lang(),
+                include_str!("../runtime/queries/json/highlights.scm"),
+            )),
+            LspLang::Python => Some((
+                python_lang(),
+                include_str!("../runtime/queries/python/highlights.scm"),
+            )),
+            LspLang::Rust => Some((
+                rust_lang(),
+                include_str!("../runtime/queries/rust/highlights.scm"),
+            )),
+            _ => None,
+        }
     }
 }
 
-impl Highlight for TreeSitterHighlight {
-    fn parse(&mut self, input: &[u8]) -> Vec<Region> {
-        let tree = self.parser.parse(input, None).unwrap();
+impl TreeSitterHighlight {
+    pub fn new(lang: LspLang) -> Option<Self> {
+        let (parser, highlight) = lang.tree_sitter_lang()?;
+        let query = Query::new(parser.language().unwrap(), highlight).unwrap();
+        Some(Self { parser, query })
+    }
+}
+
+impl StyleLayer for TreeSitterHighlight {
+    fn spans(&mut self, buffer_id: u32, min: Index, max: Index) -> anyhow::Result<Vec<Span>> {
+        let buffers = lock!(buffers);
+        let buffer = buffers.get(buffer_id)?;
+        let text = buffer.buffer.text();
+        let rope = buffer.buffer.rope();
+        let tree = self.parser.parse(&text, None).unwrap();
         let mut cur = QueryCursor::new();
 
         let mut map = HashMap::new();
@@ -71,37 +93,30 @@ impl Highlight for TreeSitterHighlight {
             }
         }
 
-        let mut regions = vec![];
+        let mut spans = vec![];
 
-        let matches = cur.matches(&self.query, tree.root_node(), input);
+        let matches = cur.matches(&self.query, tree.root_node(), text.as_bytes());
         for m in matches {
             let name = map.get(&(m.pattern_index as u32));
             if let Some(name) = name {
                 for cap in m.captures {
-                    let start = cap.node.range().start_byte;
-                    let end = cap.node.range().end_byte;
-                    regions.push(Region {
-                        index: m.pattern_index,
-                        start_byte: start,
-                        end_byte: end,
+                    let start_byte = cap.node.range().start_byte;
+                    let end_byte = cap.node.range().end_byte;
+
+                    let start = rope.byte_to_char(start_byte);
+                    let end = rope.byte_to_char(end_byte);
+
+                    spans.push(Span {
+                        start,
+                        end,
                         style: THEME.scope(name),
                     })
                 }
             }
         }
 
-        let regions = regions
-            .iter()
-            .filter(|r| {
-                !regions.iter().any(|r_top| {
-                    r_top.start_byte <= r.start_byte
-                        && r_top.end_byte >= r.end_byte
-                        && r_top.index < r.index
-                })
-            })
-            .map(|r| r.clone())
-            .collect::<Vec<_>>();
+        println!("{:?}", spans);
 
-        regions
+        Ok(spans)
     }
 }

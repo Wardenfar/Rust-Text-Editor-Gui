@@ -1,5 +1,6 @@
 use std::cmp::{max, min};
 
+use anyhow::Context;
 use std::time::Duration;
 
 use druid::kurbo::Line;
@@ -11,20 +12,28 @@ use ropey::RopeSlice;
 
 use crate::buffer::{Action, Bounds, Index, IntoWithBuffer, Movement};
 
-use crate::highlight::{Highlight, Region, TreeSitterHighlight};
+use crate::highlight::TreeSitterHighlight;
 use crate::lsp::{lsp_send, lsp_try_recv, CompletionData, LspInput, LspOutput};
+use crate::style_layer::{style_for_range, Span, StyleLayer};
 use crate::theme::Style;
-use crate::{curr_buf, lock, AppState, THEME};
+use crate::{curr_buf, lock, AppState, BufferSource, Path, THEME};
 
 pub const LINE_SPACING: f64 = 4.0;
 pub const SCROLL_GAP: usize = 4;
 pub const HALF_LINE_SPACING: f64 = LINE_SPACING / 2.0;
+pub const DEFAULT_BACKGROUND_COLOR: Color = Color::rgb8(0x2f, 0x2f, 0x2f);
+pub const DEFAULT_FOREGROUND_COLOR: Color = Color::rgb8(0xcc, 0xcc, 0xcc);
+pub const DEFAULT_TEXT_SIZE: f64 = 18.0;
+lazy_static::lazy_static! {
+    pub static ref DEFAULT_TEXT_FONT: String = String::from("Roboto Mono");
+}
 
 pub struct TextEditor {
     last_buffer_id: Option<u32>,
     char_points: Vec<(Point, Index)>,
     regions: Vec<Region>,
-    highlight: TreeSitterHighlight,
+    highlight: Option<TreeSitterHighlight>,
+    highlight_spans: Vec<Span>,
     scroll_line: usize,
     last_line_painted: usize,
 }
@@ -32,7 +41,7 @@ pub struct TextEditor {
 impl TextEditor {
     fn do_action(&mut self, action: Action, _data: &mut AppState) -> anyhow::Result<bool> {
         let (action, id) = {
-            let mut buffers = lock!(buffers);
+            let mut buffers = lock!(mut buffers);
             let buf = buffers.get_mut_curr()?;
             (buf.buffer.do_action(action), buffers.curr()?)
         };
@@ -66,7 +75,7 @@ impl TextEditor {
 
         match evt {
             LspOutput::Completion(completions) => {
-                let mut buffers = lock!(buffers);
+                let mut buffers = lock!(mut buffers);
                 let buf = buffers.get_mut_curr()?;
                 buf.buffer.completions = completions;
                 ctx.request_paint();
@@ -74,12 +83,12 @@ impl TextEditor {
             LspOutput::CompletionResolve(c) => {
                 match c.data {
                     CompletionData::Simple(text) => {
-                        let mut buffers = lock!(buffers);
+                        let mut buffers = lock!(mut buffers);
                         let buf = buffers.get_mut_curr()?;
                         buf.buffer.insert(buf.buffer.cursor().head, &text);
                     }
                     CompletionData::Edits(edits) => {
-                        let mut buffers = lock!(buffers);
+                        let mut buffers = lock!(mut buffers);
                         let buf = buffers.get_mut_curr()?;
                         edits
                             .iter()
@@ -97,6 +106,12 @@ impl TextEditor {
                 self.calculate_highlight()?;
                 ctx.request_paint();
             }
+            LspOutput::Diagnostics(url, diags) => {
+                let mut buffers = lock!(mut buffers);
+                let buf = buffers.get_mut_curr()?;
+                // buf.buffer.diagnostics = diags;
+                // ctx.request_paint();
+            }
         }
         Ok(())
     }
@@ -111,10 +126,12 @@ impl TextEditor {
         let old = self.last_buffer_id.replace(id);
         if let Some(old) = old {
             if id != old {
+                self.highlight = TreeSitterHighlight::new(curr_buf!(lang));
                 self.calculate_highlight()?;
                 ctx.request_paint();
             }
         } else {
+            self.highlight = TreeSitterHighlight::new(curr_buf!(lang));
             self.calculate_highlight()?;
             ctx.request_paint();
         }
@@ -144,7 +161,7 @@ impl TextEditor {
                         let c = {
                             let buffers = lock!(buffers);
                             let buf = buffers.get_curr()?;
-                            buf.buffer.sorted_completions().first().cloned().cloned()
+                            buf.buffer.sorted_completions()?.first().cloned().cloned()
                         };
                         let id = curr_buf!(id);
                         if let Some(c) = c {
@@ -161,28 +178,28 @@ impl TextEditor {
                         }
                     }
                     Code::ArrowDown => {
-                        let mut buffers = lock!(buffers);
+                        let mut buffers = lock!(mut buffers);
                         buffers
                             .get_mut_curr()?
                             .buffer
                             .move_cursor(Movement::Down, is_shift)
                     }
                     Code::ArrowLeft => {
-                        let mut buffers = lock!(buffers);
+                        let mut buffers = lock!(mut buffers);
                         buffers
                             .get_mut_curr()?
                             .buffer
                             .move_cursor(Movement::Left, is_shift)
                     }
                     Code::ArrowRight => {
-                        let mut buffers = lock!(buffers);
+                        let mut buffers = lock!(mut buffers);
                         buffers
                             .get_mut_curr()?
                             .buffer
                             .move_cursor(Movement::Right, is_shift)
                     }
                     Code::ArrowUp => {
-                        let mut buffers = lock!(buffers);
+                        let mut buffers = lock!(mut buffers);
                         buffers
                             .get_mut_curr()?
                             .buffer
@@ -191,6 +208,30 @@ impl TextEditor {
                     Code::Backspace => self.do_action(Action::Backspace, data)?,
                     Code::Delete => self.do_action(Action::Delete, data)?,
                     Code::Enter => self.do_action(Action::Insert("\n".into()), data)?,
+                    Code::KeyS if key.mods.ctrl() => {
+                        let uri = curr_buf!(uri);
+
+                        if let Some(uri) = uri {
+                            let id = curr_buf!(id);
+                            let buffers = lock!(buffers);
+                            // get buffer rope
+                            let buf = buffers.get_curr()?;
+                            let rope = buf.buffer.rope();
+                            // if buffer source is a file
+                            if let BufferSource::File { path } = &buf.source {
+                                rope.write_to(path.writer())?;
+                                lsp_send(
+                                    id,
+                                    LspInput::SavedFile {
+                                        uri,
+                                        content: buf.buffer.text(),
+                                    },
+                                )?;
+                            }
+                        }
+
+                        false
+                    }
                     _ => {
                         let code = key.key.legacy_charcode();
                         if code == 0 {
@@ -231,7 +272,7 @@ impl TextEditor {
                         .map(|(_, idx)| idx.clone());
                     if let Some(idx) = found {
                         {
-                            let mut buffers = lock!(buffers);
+                            let mut buffers = lock!(mut buffers);
                             buffers
                                 .get_mut_curr()?
                                 .buffer
@@ -250,7 +291,10 @@ impl TextEditor {
 
     fn _paint(&mut self, ctx: &mut PaintCtx, env: &Env) -> anyhow::Result<()> {
         let rect = ctx.size().to_rect();
-        let bg = THEME.scope("ui.background").bg();
+        let bg = THEME
+            .scope("ui.background")
+            .background
+            .unwrap_or(DEFAULT_BACKGROUND_COLOR);
         ctx.fill(rect, &bg);
 
         let buffers = lock!(buffers);
@@ -288,7 +332,10 @@ impl TextEditor {
                     Point::new(linenr_max_width, 0.0),
                     Point::new(linenr_max_width, rect.height()),
                 ),
-                &THEME.scope("ui.popup").bg(),
+                &THEME
+                    .scope("ui.popup")
+                    .background
+                    .unwrap_or(DEFAULT_BACKGROUND_COLOR),
                 1.0,
             );
 
@@ -300,43 +347,29 @@ impl TextEditor {
 
             self.last_line_painted = 0;
 
+            let mut spans_layers = vec![];
+            spans_layers.push(self.highlight_spans.as_slice());
+
             for (line_number_layout, line) in line_numbers_layouts
                 .iter()
                 .zip((0..).skip(self.scroll_line))
             {
                 let bounds = buf.buffer.line_bounds(line);
+                let text = buf.buffer.text_slice(bounds.0..bounds.1)?;
                 let slice = rope.slice(bounds.0..bounds.1);
 
-                let byte_start = rope.char_to_byte(bounds.0);
-                let byte_end = rope.char_to_byte(bounds.1);
+                let spans = style_for_range(&spans_layers, bounds.0, bounds.1)?;
 
-                let regions = self
-                    .regions
+                let layouts = spans
                     .iter()
-                    .filter_map(|r| {
-                        let start = max(byte_start, r.start_byte);
-                        let end = min(byte_end, r.end_byte);
-                        if start < end {
-                            Some(Region {
-                                index: r.index,
-                                start_byte: start - byte_start,
-                                end_byte: end - byte_start,
-                                style: r.style.clone(),
-                            })
-                        } else {
-                            None
-                        }
-                    })
+                    .map(|s| text_layout(ctx, env, &text, &s.style))
                     .collect::<Vec<_>>();
 
-                let cuts = Self::find_cuts(byte_end - byte_start, &regions);
-                let parts = Self::build_parts(ctx, env, bounds.0, slice, &cuts);
-
-                let max_height = parts
+                let max_height = layouts
                     .iter()
-                    .map(|l| l.layout.size().height)
+                    .map(|l| l.size().height)
                     .max_by(|a, b| a.partial_cmp(b).unwrap())
-                    .unwrap();
+                    .unwrap_or(10.0);
 
                 ctx.draw_text(
                     line_number_layout,
@@ -347,38 +380,44 @@ impl TextEditor {
                 );
 
                 let mut x = linenr_max_width + LINE_SPACING * 2.0;
-                for part in &parts {
-                    for idx in part.start_char..part.end_char {
-                        let with_offset = idx - part.start_char;
-                        let rects = part.layout.rects_for_range(with_offset..=with_offset);
+                for (span, layout) in spans.iter().zip(layouts) {
+                    for idx in span.start..span.end {
+                        let with_offset = idx - span.start;
+                        let rects = layout.rects_for_range(with_offset..=with_offset);
                         for r in rects {
                             let point = Point::new(r.x0 + x, y + (r.y0 + r.y1) / 2.0);
                             self.char_points.push((point, idx))
                         }
                     }
 
-                    let sel_min = max(part.start_char, buf.buffer.cursor().min())
-                        .saturating_sub(part.start_char);
-                    let sel_max = min(part.end_char, buf.buffer.cursor().max())
-                        .saturating_sub(part.start_char);
+                    let sel_min =
+                        max(span.start, buf.buffer.cursor().min()).saturating_sub(span.start);
+                    let sel_max =
+                        min(span.end, buf.buffer.cursor().max()).saturating_sub(span.start);
 
                     if sel_min < sel_max {
-                        let rects = part.layout.rects_for_range(sel_min..sel_max);
+                        let rects = layout.rects_for_range(sel_min..sel_max);
                         ctx.with_save(|ctx| {
                             ctx.transform(Affine::translate(Vec2::new(x, y)));
                             for mut r in rects {
                                 r.y1 += LINE_SPACING;
-                                ctx.fill(r, &THEME.scope("ui.selection").bg())
+                                ctx.fill(
+                                    r,
+                                    &THEME
+                                        .scope("ui.selection")
+                                        .background
+                                        .unwrap_or(DEFAULT_BACKGROUND_COLOR),
+                                )
                             }
                         });
                     }
 
-                    ctx.draw_text(&part.layout, Point::new(x, y));
+                    ctx.draw_text(&layout, Point::new(x, y));
 
-                    if part.start_char <= cursor && cursor <= part.end_char {
-                        let char_idx = cursor - part.start_char;
-                        let byte_idx = part.slice.char_to_byte(char_idx);
-                        let hit = part.layout.hit_test_text_position(byte_idx);
+                    if span.start <= cursor && cursor <= span.end {
+                        let char_idx = cursor - span.start;
+                        let byte_idx = slice.char_to_byte(char_idx);
+                        let hit = layout.hit_test_text_position(byte_idx);
                         let curr_x = x + hit.point.x;
                         let line = Line::new(
                             Point::new(curr_x, y),
@@ -388,7 +427,7 @@ impl TextEditor {
                         ctx.stroke(line, &Color::RED, 1.0);
                     }
 
-                    x += part.layout.trailing_whitespace_width();
+                    x += layout.trailing_whitespace_width();
                 }
 
                 y += max_height + LINE_SPACING;
@@ -411,6 +450,7 @@ impl TextEditor {
             let text = buf
                 .buffer
                 .sorted_completions()
+                .unwrap_or_else(|_| vec![])
                 .iter()
                 .take(8)
                 .map(|c| &c.label)
@@ -424,7 +464,13 @@ impl TextEditor {
                 cursor_point.0 + layout.size().width,
                 cursor_point.1 + layout.size().height,
             );
-            ctx.fill(rect, &THEME.scope("ui.popup").bg());
+            ctx.fill(
+                rect,
+                &THEME
+                    .scope("ui.popup")
+                    .background
+                    .unwrap_or(DEFAULT_BACKGROUND_COLOR),
+            );
             ctx.draw_text(&layout, Point::new(cursor_point.0, cursor_point.1));
         }
         ctx.restore().unwrap();
@@ -434,24 +480,26 @@ impl TextEditor {
 
 impl TextEditor {
     pub fn new() -> Self {
-        let highlight = TreeSitterHighlight::new();
         Self {
             last_buffer_id: None,
             char_points: vec![],
             regions: vec![],
-            highlight,
+            highlight: None,
+            highlight_spans: vec![],
             scroll_line: 0,
             last_line_painted: 0,
         }
     }
 
     pub fn calculate_highlight(&mut self) -> anyhow::Result<()> {
+        let highlight = self.highlight.as_mut().context("no highlight")?;
         let buffers = lock!(buffers);
-        let buf = buffers.get(buffers.curr()?)?;
-        let regions = self
-            .highlight
-            .parse(buf.buffer.rope().slice(..).as_str().unwrap().as_bytes());
-        self.regions = regions;
+        let buf = buffers.get_curr()?;
+        let rope = buf.buffer.rope();
+        let min = 0;
+        let max = rope.len_chars();
+        self.highlight_spans =
+            highlight.spans(self.last_buffer_id.context("no buffer")?, min, max)?;
         Ok(())
     }
 
@@ -483,33 +531,6 @@ impl TextEditor {
             });
         }
         parts
-    }
-
-    fn find_cuts(line_bytes_len: usize, regions: &Vec<Region>) -> Vec<Cut> {
-        let mut cuts = Vec::new();
-
-        let mut last_index = 0;
-        for r in regions.iter().sorted_by_key(|r| r.start_byte) {
-            if r.start_byte > last_index {
-                cuts.push(Cut {
-                    start_byte: last_index,
-                    end_byte: r.start_byte,
-                    style: Style::default(),
-                });
-            }
-            cuts.push(Cut {
-                start_byte: r.start_byte,
-                end_byte: r.end_byte,
-                style: r.style.clone(),
-            });
-            last_index = r.end_byte;
-        }
-        cuts.push(Cut {
-            start_byte: last_index,
-            end_byte: line_bytes_len,
-            style: Style::default(),
-        });
-        cuts
     }
 
     fn scroll(&mut self, scroll: isize) -> anyhow::Result<()> {
@@ -585,21 +606,38 @@ pub fn text_layout(ctx: &mut PaintCtx, _env: &Env, text: &str, style: &Style) ->
     let mut builder = ctx
         .text()
         .new_text_layout(text.to_string())
-        .text_color(style.fg())
+        .text_color(
+            style
+                .foreground
+                .as_ref()
+                .unwrap_or(&DEFAULT_FOREGROUND_COLOR)
+                .clone(),
+        )
         .font(
-            FontFamily::new_unchecked(style.font_family()),
-            style.font_size(),
+            FontFamily::new_unchecked(
+                style
+                    .text_font
+                    .as_ref()
+                    .unwrap_or(&DEFAULT_TEXT_FONT)
+                    .as_str(),
+            ),
+            style.text_size.unwrap_or(DEFAULT_TEXT_SIZE),
         );
 
-    if style.bold() {
-        builder = builder.range_attribute(.., TextAttribute::Weight(FontWeight::BOLD));
+    if let Some(bold) = style.bold {
+        if bold {
+            builder = builder.range_attribute(.., TextAttribute::Weight(FontWeight::BOLD));
+        }
     }
-    if style.italic() {
-        builder = builder.range_attribute(.., TextAttribute::Style(FontStyle::Italic));
+    if let Some(italic) = style.italic {
+        if italic {
+            builder = builder.range_attribute(.., TextAttribute::Style(FontStyle::Italic));
+        }
     }
-    if style.underline() {
-        builder = builder.range_attribute(.., TextAttribute::Underline(true));
+    if let Some(underline) = style.underline {
+        if underline {
+            builder = builder.range_attribute(.., TextAttribute::Underline(true));
+        }
     }
-
     builder.build().unwrap()
 }

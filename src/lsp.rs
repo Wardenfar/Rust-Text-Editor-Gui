@@ -12,7 +12,6 @@ use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::process::ChildStdin;
 use tokio::sync::mpsc;
 
-
 use crate::{lock, Path, GLOBAL, LSP};
 
 const ID_INIT: u64 = 0;
@@ -22,6 +21,8 @@ const ID_COMPLETION_RESOLVE: u64 = 2;
 #[derive(Debug, Clone, Hash, Eq, PartialEq)]
 pub enum LspLang {
     Rust,
+    Json,
+    Python,
     PlainText,
 }
 
@@ -29,6 +30,8 @@ impl LspLang {
     pub fn from_ext<S: Into<String>>(ext: S) -> Option<LspLang> {
         match ext.into().as_str() {
             "rs" => Some(LspLang::Rust),
+            "py" => Some(LspLang::Python),
+            "json" => Some(LspLang::Json),
             _ => None,
         }
     }
@@ -137,12 +140,17 @@ pub enum LspInput {
     CloseFile {
         uri: Url,
     },
+    SavedFile {
+        uri: Url,
+        content: String,
+    },
 }
 
 #[derive(Debug)]
 pub enum LspOutput {
     Completion(Vec<LspCompletion>),
     CompletionResolve(LspCompletion),
+    Diagnostics(Url, Vec<Diagnostic>),
 }
 
 #[derive(Debug, Clone)]
@@ -182,7 +190,12 @@ impl LspClient {
             capabilities: lsp_types::ClientCapabilities {
                 workspace: None,
                 text_document: Some(TextDocumentClientCapabilities {
-                    synchronization: None,
+                    synchronization: Some(TextDocumentSyncClientCapabilities {
+                        dynamic_registration: Some(false),
+                        will_save: Some(false),
+                        will_save_wait_until: Some(false),
+                        did_save: Some(true),
+                    }),
                     completion: Some(CompletionClientCapabilities {
                         dynamic_registration: Some(false),
                         completion_item: Some(CompletionItemCapability {
@@ -213,14 +226,26 @@ impl LspClient {
                     definition: None,
                     type_definition: None,
                     implementation: None,
-                    code_action: None,
+                    code_action: Some(CodeActionClientCapabilities {
+                        dynamic_registration: Some(false),
+                        code_action_literal_support: None,
+                        is_preferred_support: None,
+                        disabled_support: None,
+                        data_support: Some(true),
+                        resolve_support: Some(CodeActionCapabilityResolveSupport {
+                            properties: vec![],
+                        }),
+                        honors_change_annotations: None,
+                    }),
                     code_lens: None,
                     document_link: None,
                     color_provider: None,
                     rename: None,
                     publish_diagnostics: Some(PublishDiagnosticsClientCapabilities {
                         related_information: Some(true),
-                        tag_support: None,
+                        tag_support: Some(TagSupport {
+                            value_set: vec![DiagnosticTag::DEPRECATED, DiagnosticTag::UNNECESSARY],
+                        }),
                         version_support: Some(true),
                         code_description_support: Some(true),
                         data_support: Some(true),
@@ -297,7 +322,10 @@ impl LspClient {
                 reader.read_exact(&mut content).await?;
                 let msg = String::from_utf8(content)?;
                 let output: serde_json::Result<Output> = serde_json::from_str(&msg);
+                let notification: serde_json::Result<serde_json::Value> =
+                    serde_json::from_str(&msg);
                 if let Ok(Output::Success(suc)) = output {
+                    println!("{}", suc.result);
                     if suc.id == Id::Num(ID_INIT) {
                         init_tx.send(())?;
                     } else if suc.id == Id::Num(ID_COMPLETION) {
@@ -309,12 +337,23 @@ impl LspClient {
                         };
                         tx.send(LspOutput::Completion(completions))?;
                     } else if suc.id == Id::Num(ID_COMPLETION_RESOLVE) {
-                        println!("{}", suc.result);
                         let item: CompletionItem = serde_json::from_value(suc.result)?;
                         tx.send(LspOutput::CompletionResolve(
                             convert_completion(item).unwrap(),
                         ))?;
                     }
+                } else if let Ok(notification) = notification {
+                    if notification.get("method").unwrap() == "textDocument/publishDiagnostics" {
+                        let params: PublishDiagnosticsParams =
+                            serde_json::from_value(notification.get("params").unwrap().clone())
+                                .unwrap();
+                        let diagnostics = params.diagnostics;
+                        tx.send(LspOutput::Diagnostics(params.uri, diagnostics))?;
+                    } else {
+                        println!("{:?}", notification);
+                    }
+                } else {
+                    println!("fail : {}", msg);
                 }
             }
         });
@@ -381,38 +420,19 @@ impl LspClient {
                 .await
                 .unwrap();
             }
-            LspInput::RequestCompletionResolve { buffer_id: _, item } => {
-                send_request_async::<_, lsp_types::request::ResolveCompletionItem>(
-                    &mut stdin,
-                    ID_COMPLETION_RESOLVE,
-                    item,
-                )
-                .await?
+            LspInput::RequestCompletionResolve { item, .. } => {
+                request_resolve_completion_item(&mut stdin, item)
+                    .await
+                    .unwrap();
             }
             LspInput::OpenFile { uri: url, content } => {
-                let open = lsp_types::DidOpenTextDocumentParams {
-                    text_document: lsp_types::TextDocumentItem {
-                        uri: url,
-                        language_id: "py".into(),
-                        version: 0,
-                        text: content,
-                    },
-                };
-                send_notify_async::<_, lsp_types::notification::DidOpenTextDocument>(
-                    &mut stdin, open,
-                )
-                .await
-                .unwrap();
+                notify_did_open(&mut stdin, url, content).await.unwrap();
             }
             LspInput::CloseFile { uri } => {
-                let close = lsp_types::DidCloseTextDocumentParams {
-                    text_document: TextDocumentIdentifier { uri },
-                };
-                send_notify_async::<_, lsp_types::notification::DidCloseTextDocument>(
-                    &mut stdin, close,
-                )
-                .await
-                .unwrap();
+                notify_did_close(&mut stdin, uri).await.unwrap();
+            }
+            LspInput::SavedFile { uri, content } => {
+                notify_did_save(&mut stdin, uri, content).await.unwrap();
             }
             LspInput::Edit {
                 version: _v,
@@ -529,4 +549,58 @@ where
     } else {
         anyhow::bail!("Invalid params")
     }
+}
+
+// lsp notify dud save
+async fn notify_did_save<T: AsyncWrite + std::marker::Unpin>(
+    stdin: &mut T,
+    uri: Url,
+    content: String,
+) -> anyhow::Result<()> {
+    let params = lsp_types::DidSaveTextDocumentParams {
+        text_document: TextDocumentIdentifier { uri },
+        text: Some(content),
+    };
+    send_notify_async::<_, lsp_types::notification::DidSaveTextDocument>(stdin, params).await
+}
+
+// lsp notify did close
+async fn notify_did_close<T: AsyncWrite + std::marker::Unpin>(
+    stdin: &mut T,
+    uri: Url,
+) -> anyhow::Result<()> {
+    let params = lsp_types::DidCloseTextDocumentParams {
+        text_document: TextDocumentIdentifier { uri },
+    };
+    send_notify_async::<_, lsp_types::notification::DidCloseTextDocument>(stdin, params).await
+}
+
+// lsp notify did open
+async fn notify_did_open<T: AsyncWrite + std::marker::Unpin>(
+    stdin: &mut T,
+    uri: Url,
+    text: String,
+) -> anyhow::Result<()> {
+    let params = lsp_types::DidOpenTextDocumentParams {
+        text_document: TextDocumentItem {
+            uri,
+            language_id: "rust".to_string(),
+            version: 0,
+            text,
+        },
+    };
+    send_notify_async::<_, lsp_types::notification::DidOpenTextDocument>(stdin, params).await
+}
+
+// lsp request resolve completion item
+async fn request_resolve_completion_item<T: AsyncWrite + std::marker::Unpin>(
+    stdin: &mut T,
+    item: CompletionItem,
+) -> anyhow::Result<()> {
+    send_request_async::<_, lsp_types::request::ResolveCompletionItem>(
+        stdin,
+        ID_COMPLETION_RESOLVE,
+        item,
+    )
+    .await
 }

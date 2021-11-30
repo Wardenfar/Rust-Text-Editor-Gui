@@ -59,6 +59,7 @@ impl FileSystem for LocalFs {
 
 impl Path for LocalPath {
     type Reader = File;
+    type Writer = File;
 
     fn lsp_lang(&self) -> LspLang {
         if let Some(ext) = self.extension() {
@@ -86,6 +87,9 @@ impl Path for LocalPath {
     fn reader(&self) -> Self::Reader {
         StdFile::open(&self.inner).unwrap()
     }
+    fn writer(&self) -> Self::Writer {
+        StdFile::create(&self.inner).unwrap()
+    }
 }
 
 pub trait FileSystem {
@@ -100,12 +104,14 @@ pub trait FileSystem {
 
 pub trait Path {
     type Reader;
+    type Writer;
 
     fn lsp_lang(&self) -> LspLang;
     fn name(&self) -> String;
     fn path(&self) -> String;
     fn uri(&self) -> Url;
     fn reader(&self) -> Self::Reader;
+    fn writer(&self) -> Self::Writer;
 }
 
 impl Tree for LocalFs {
@@ -141,7 +147,7 @@ impl Tree for LocalFs {
 
     fn key_down(&mut self, selected: &Self::Key, key: &KbKey) -> ShouldRepaint {
         if key == &KbKey::Enter && selected.inner.is_file() {
-            let mut buffers = lock!(buffers);
+            let mut buffers = lock!(mut buffers);
             buffers.open_file(selected.clone()).unwrap();
             true
         } else {

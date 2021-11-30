@@ -1,4 +1,4 @@
-use crate::editor::{text_layout, HALF_LINE_SPACING, LINE_SPACING};
+use crate::editor::{text_layout, DEFAULT_BACKGROUND_COLOR, HALF_LINE_SPACING, LINE_SPACING};
 use crate::{AppState, THEME};
 use druid::piet::TextLayout;
 use druid::{
@@ -137,7 +137,13 @@ impl<T: Tree> Widget<AppState> for TreeViewer<T> {
         let rect = ctx.size().to_rect();
         ctx.save().unwrap();
         ctx.clip(rect.clone());
-        ctx.fill(rect, &THEME.scope("ui.background").bg());
+        ctx.fill(
+            rect,
+            &THEME
+                .scope("ui.background")
+                .background
+                .unwrap_or(DEFAULT_BACKGROUND_COLOR),
+        );
 
         let root = self.tree.root();
         let items = self.displayed(data, &root);
@@ -152,7 +158,13 @@ impl<T: Tree> Widget<AppState> for TreeViewer<T> {
             if let Some(selected) = &self.selected {
                 if key == selected {
                     style = THEME.scope("tree.selected");
-                    bg = Some(style.bg());
+                    bg = Some(
+                        style
+                            .background
+                            .as_ref()
+                            .unwrap_or(&DEFAULT_BACKGROUND_COLOR)
+                            .clone(),
+                    );
                 }
             }
 

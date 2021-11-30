@@ -1,9 +1,10 @@
-use itertools::Itertools;
 use std::cmp::{max, min};
+use std::collections::Bound;
 use std::io::Read;
 use std::ops::RangeBounds;
 use std::sync::atomic::{AtomicI32, Ordering};
 
+use itertools::Itertools;
 use lsp_types::{Position, Range};
 use ropey::Rope;
 
@@ -92,14 +93,14 @@ impl<T> FromWithBuffer<T> for T {
 }
 
 impl Buffer {
-    pub fn sorted_completions(&self) -> Vec<&LspCompletion> {
+    pub fn sorted_completions(&self) -> anyhow::Result<Vec<&LspCompletion>> {
         let cursor_idx = self.cursor().head;
         let before_cursor_idx = cursor_idx.saturating_sub(20);
-        let window = self.text_slice(before_cursor_idx..cursor_idx);
+        let window = self.text_slice(before_cursor_idx..cursor_idx)?;
         let win_size = window.len();
 
         let completions = &self.completions;
-        completions
+        let result = completions
             .iter()
             .sorted_by_key(|c| match &c.data {
                 CompletionData::Simple(text) => {
@@ -117,19 +118,25 @@ impl Buffer {
                     let bounds: Bounds = (&edit.range).into_with_buf(&self);
 
                     let buf_text = self.text_slice(bounds.0..bounds.1);
-                    if edit.new_text.eq(&buf_text) {
-                        4
-                    } else if edit.new_text.starts_with(&buf_text) {
-                        3
-                    } else if edit.new_text.contains(&buf_text) {
-                        2
-                    } else {
-                        1
+                    match buf_text {
+                        Ok(buf_text) => {
+                            if edit.new_text.eq(&buf_text) {
+                                4
+                            } else if edit.new_text.starts_with(&buf_text) {
+                                3
+                            } else if edit.new_text.contains(&buf_text) {
+                                2
+                            } else {
+                                1
+                            }
+                        }
+                        Err(_) => 0,
                     }
                 }
             })
             .rev()
-            .collect()
+            .collect();
+        Ok(result)
     }
 
     pub fn from_reader<R: Read>(id: u32, reader: R) -> Self {
@@ -361,8 +368,35 @@ impl Buffer {
         self.rope.chars().collect()
     }
 
-    pub fn text_slice<R: RangeBounds<usize>>(&self, range: R) -> String {
-        self.rope.slice(range).chars().collect()
+    pub fn text_slice<R: RangeBounds<usize>>(&self, range: R) -> anyhow::Result<String> {
+        let start = match range.start_bound() {
+            Bound::Included(n) => Some(*n),
+            Bound::Excluded(n) => Some(*n + 1),
+            Bound::Unbounded => None,
+        };
+
+        let end = match range.end_bound() {
+            Bound::Included(n) => Some(*n + 1),
+            Bound::Excluded(n) => Some(*n),
+            Bound::Unbounded => None,
+        };
+
+        if let Some(end) = end {
+            if end > self.rope.len_chars() {
+                anyhow::bail!("rope slice overflow");
+            }
+        }
+
+        match (start, end) {
+            (Some(start), Some(end)) => {
+                if start > end {
+                    anyhow::bail!("start > end");
+                }
+            }
+            _ => {}
+        }
+
+        Ok(self.rope.slice(range).chars().collect())
     }
 }
 

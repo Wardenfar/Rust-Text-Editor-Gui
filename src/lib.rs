@@ -8,6 +8,7 @@ pub mod editor;
 pub mod fs;
 pub mod highlight;
 pub mod lsp;
+mod style_layer;
 pub mod theme;
 pub mod tree;
 
@@ -16,6 +17,7 @@ use crate::lsp::{lsp_send_with_lang, LspInput, LspLang};
 use anyhow::Context;
 use fs::LocalFs;
 use lsp::LspSystem;
+use parking_lot::RwLock;
 use std::sync::Mutex;
 use theme::Theme;
 
@@ -26,7 +28,7 @@ lazy_static::lazy_static! {
     pub static ref THEME: Theme = toml::from_str(include_str!("../runtime/themes/gruvbox.toml")).unwrap();
     pub static ref FS: LocalFs = LocalFs::default();
     pub static ref LSP: Mutex<LspSystem> = Mutex::new(LspSystem::default());
-    pub static ref BUFFERS: Mutex<Buffers> = Mutex::new(Buffers::default());
+    pub static ref BUFFERS: RwLock<Buffers> = RwLock::new(Buffers::default());
     pub static ref GLOBAL: Mutex<Global> = Mutex::new(Global {
         root_path: FS.path("./data/example")
     });
@@ -36,7 +38,11 @@ lazy_static::lazy_static! {
 macro_rules! lock {
     (buffers) => {{
         // println!("{} {}", file!(), line!());
-        crate::BUFFERS.lock().unwrap()
+        crate::BUFFERS.read()
+    }};
+    (mut buffers) => {{
+        // println!("{} {}", file!(), line!());
+        crate::BUFFERS.write()
     }};
 }
 
@@ -45,6 +51,10 @@ macro_rules! curr_buf {
     (row) => {{
         let buffers = lock!(buffers);
         buffers.get_curr()?.buffer.row()
+    }};
+    (lang) => {{
+        let buffers = lock!(buffers);
+        buffers.get_curr()?.lsp_lang.clone()
     }};
     (col) => {{
         let buffers = lock!(buffers);
@@ -58,9 +68,23 @@ macro_rules! curr_buf {
         let buffers = lock!(buffers);
         buffers.get_curr()?.buffer.text()
     }};
+    (rope) => {{
+        let buffers = lock!(buffers);
+        buffers.get_curr()?.buffer.rope()
+    }};
     (cursor) => {{
         let buffers = lock!(buffers);
         buffers.get_curr()?.buffer.cursor()
+    }};
+    (uri) => {{
+        let buffers = lock!(buffers);
+        let buf = buffers.get_curr()?;
+        if let $crate::BufferSource::File { path } = &buf.source {
+            use $crate::fs::Path;
+            Some(path.uri())
+        } else {
+            None
+        }
     }};
 }
 
