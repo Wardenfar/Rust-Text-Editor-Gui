@@ -382,12 +382,17 @@ impl TextEditor {
 
                 let mut x = linenr_max_width + LINE_SPACING * 2.0;
                 for (span, layout) in spans.iter().zip(layouts) {
+                    let slice = rope.slice(span.start..span.end);
                     for idx in span.start..span.end {
-                        let byte = slice.char_to_byte(idx - span.start);
-                        let rects = layout.rects_for_range(byte..=byte);
-                        for r in rects {
-                            let point = Point::new(r.x0 + x, y + (r.y0 + r.y1) / 2.0);
-                            self.char_points.push((point, idx))
+                        if idx - span.start + 1 < slice.len_chars() {
+                            let byte_start = slice.char_to_byte(idx - span.start);
+                            let byte_end = slice.char_to_byte(idx - span.start + 1);
+                            println!("{} {}", byte_start, byte_end);
+                            let rects = layout.rects_for_range(byte_start..byte_end);
+                            for r in rects {
+                                let point = Point::new(r.x0 + x, y + (r.y0 + r.y1) / 2.0);
+                                self.char_points.push((point, idx))
+                            }
                         }
                     }
 

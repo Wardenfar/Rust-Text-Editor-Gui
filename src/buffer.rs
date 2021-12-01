@@ -5,10 +5,18 @@ use std::ops::RangeBounds;
 use std::sync::atomic::{AtomicI32, Ordering};
 
 use itertools::Itertools;
-use lsp_types::{Diagnostic, Position, Range};
+use lsp_types::{DiagnosticSeverity, Position, Range};
 use ropey::Rope;
 
 use crate::lsp::{CompletionData, LspCompletion, LspInput};
+
+pub struct Diagnostic {
+    pub bounds: Bounds,
+    pub severity: DiagnosticSeverity,
+    pub message: String,
+}
+
+pub struct Diagnotics(pub(crate) Vec<Diagnostic>);
 
 pub struct Buffer {
     id: u32,
@@ -16,7 +24,7 @@ pub struct Buffer {
     cursor: Cursor,
     pub version: AtomicI32,
     pub completions: Vec<LspCompletion>,
-    pub diagnostics: Vec<Diagnostic>,
+    pub diagnostics: Diagnotics,
 }
 
 pub enum Movement {
@@ -147,7 +155,7 @@ impl Buffer {
             cursor: Cursor { head: 0, tail: 0 },
             version: Default::default(),
             completions: vec![],
-            diagnostics: vec![],
+            diagnostics: Diagnotics(vec![]),
         }
     }
 
@@ -291,37 +299,36 @@ impl Buffer {
             end = self.line_bounds(end_line.saturating_add(1)).0;
         }
 
-        let head = self.cursor.head;
-        if head >= end {
-            self.cursor.head = head - (end - start)
-        } else if head >= start {
-            self.cursor.head = start
-        }
-
-        let tail = self.cursor.tail;
-        if tail >= end {
-            self.cursor.tail = tail - (end - start)
-        } else if tail >= start {
-            self.cursor.tail = start
-        }
+        self.transform_idx(|idx| {
+            if idx >= end {
+                idx - (end - start)
+            } else if idx >= start {
+                start
+            } else {
+                idx
+            }
+        });
 
         self.rope.remove(start..end);
 
         Some(self.lsp_edit())
     }
 
+    pub fn transform_idx<F: Fn(Index) -> Index>(&mut self, f: F) {
+        self.cursor.head = (f)(self.cursor.head);
+        self.cursor.tail = (f)(self.cursor.tail);
+        for diag in &mut self.diagnostics.0 {
+            diag.bounds.0 = (f)(diag.bounds.0);
+            diag.bounds.1 = (f)(diag.bounds.1);
+        }
+    }
+
     pub fn insert<I: IntoWithBuffer<Index>>(&mut self, start: I, chars: &str) -> LspInput {
         let start = start.into_with_buf(self);
 
-        let curr = self.cursor.head;
-        if curr >= start {
-            self.cursor.head = curr + chars.chars().count()
-        }
+        let chars_count = chars.chars().count();
 
-        let curr = self.cursor.tail;
-        if curr >= start {
-            self.cursor.tail = curr + chars.chars().count()
-        }
+        self.transform_idx(|idx| if idx >= start { idx + chars_count } else { idx });
 
         self.rope.insert(start, chars);
 

@@ -1,4 +1,4 @@
-use crate::buffer::{Index, IntoWithBuffer};
+use crate::buffer::Index;
 use crate::lock;
 use crate::theme::Style;
 use druid::Color;
@@ -72,10 +72,10 @@ impl StyleLayer for DiagStyleLayer {
         let buffers = lock!(buffers);
         let buf = buffers.get(buffer_id)?;
         let mut spans = Vec::new();
-        for diagnostic in buf.buffer.diagnostics.iter() {
+        for diag in buf.buffer.diagnostics.0.iter() {
             let mut span = Span::default();
-            span.start = (&diagnostic.range.start).into_with_buf(&buf.buffer);
-            span.end = (&diagnostic.range.end).into_with_buf(&buf.buffer);
+            span.start = diag.bounds.0;
+            span.end = diag.bounds.1;
             span.style.foreground = Some(Color::RED);
             span.style.underline = Some(true);
             span.style.italic = Some(true);
