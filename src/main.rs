@@ -17,7 +17,7 @@ async fn main() -> anyhow::Result<()> {
     // describe the main window
     let main_window = WindowDesc::new(build_root_widget)
         .title(WINDOW_TITLE)
-        .window_size((600.0, 450.0));
+        .window_size((1000.0, 600.0));
 
     let _root = FS.path("./data/example");
 

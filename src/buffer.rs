@@ -5,7 +5,7 @@ use std::ops::RangeBounds;
 use std::sync::atomic::{AtomicI32, Ordering};
 
 use itertools::Itertools;
-use lsp_types::{Position, Range};
+use lsp_types::{Diagnostic, Position, Range};
 use ropey::Rope;
 
 use crate::lsp::{CompletionData, LspCompletion, LspInput};
@@ -16,6 +16,7 @@ pub struct Buffer {
     cursor: Cursor,
     pub version: AtomicI32,
     pub completions: Vec<LspCompletion>,
+    pub diagnostics: Vec<Diagnostic>,
 }
 
 pub enum Movement {
@@ -146,6 +147,7 @@ impl Buffer {
             cursor: Cursor { head: 0, tail: 0 },
             version: Default::default(),
             completions: vec![],
+            diagnostics: vec![],
         }
     }
 

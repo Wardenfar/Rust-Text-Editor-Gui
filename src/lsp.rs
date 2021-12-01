@@ -12,7 +12,7 @@ use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::process::ChildStdin;
 use tokio::sync::mpsc;
 
-use crate::{lock, Path, GLOBAL, LSP};
+use crate::{lock, BufferSource, Path, GLOBAL, LSP};
 
 const ID_INIT: u64 = 0;
 const ID_COMPLETION: u64 = 1;
@@ -150,7 +150,7 @@ pub enum LspInput {
 pub enum LspOutput {
     Completion(Vec<LspCompletion>),
     CompletionResolve(LspCompletion),
-    Diagnostics(Url, Vec<Diagnostic>),
+    Diagnostics,
 }
 
 #[derive(Debug, Clone)]
@@ -348,7 +348,8 @@ impl LspClient {
                             serde_json::from_value(notification.get("params").unwrap().clone())
                                 .unwrap();
                         let diagnostics = params.diagnostics;
-                        tx.send(LspOutput::Diagnostics(params.uri, diagnostics))?;
+                        process_diagnostics(params.uri.clone(), &diagnostics);
+                        tx.send(LspOutput::Diagnostics)?;
                     } else {
                         println!("{:?}", notification);
                     }
@@ -603,4 +604,32 @@ async fn request_resolve_completion_item<T: AsyncWrite + std::marker::Unpin>(
         item,
     )
     .await
+}
+
+fn process_diagnostics(default_uri: Url, diagnostics: &Vec<Diagnostic>) {
+    let mut buffers = lock!(mut buffers);
+
+    let mut cleared = Vec::new();
+    for diagnostic in diagnostics {
+        let mut uri = default_uri.clone();
+        if let Some(infos) = &diagnostic.related_information {
+            for info in infos {
+                uri = info.location.uri.clone();
+            }
+        }
+        let buf = buffers.buffers.iter_mut().find(|(_, b)| {
+            if let BufferSource::File { path } = &b.source {
+                uri.as_str().to_lowercase() == path.uri().as_str().to_lowercase()
+            } else {
+                false
+            }
+        });
+        if let Some((id, buf)) = buf {
+            if !cleared.contains(id) {
+                buf.buffer.diagnostics.clear();
+                cleared.push(*id);
+            }
+            buf.buffer.diagnostics.push(diagnostic.clone());
+        }
+    }
 }

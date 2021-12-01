@@ -78,7 +78,7 @@ impl TreeSitterHighlight {
 }
 
 impl StyleLayer for TreeSitterHighlight {
-    fn spans(&mut self, buffer_id: u32, min: Index, max: Index) -> anyhow::Result<Vec<Span>> {
+    fn spans(&mut self, buffer_id: u32, _min: Index, _max: Index) -> anyhow::Result<Vec<Span>> {
         let buffers = lock!(buffers);
         let buffer = buffers.get(buffer_id)?;
         let text = buffer.buffer.text();
@@ -106,17 +106,20 @@ impl StyleLayer for TreeSitterHighlight {
                     let start = rope.byte_to_char(start_byte);
                     let end = rope.byte_to_char(end_byte);
 
-                    spans.push(Span {
-                        start,
-                        end,
-                        style: THEME.scope(name),
-                    })
+                    spans.push((
+                        m.pattern_index,
+                        Span {
+                            start,
+                            end,
+                            style: THEME.scope(name),
+                        },
+                    ))
                 }
             }
         }
 
-        println!("{:?}", spans);
-
-        Ok(spans)
+        spans.sort_unstable_by_key(|(i, _)| *i);
+        spans.reverse();
+        Ok(spans.into_iter().map(|(_, span)| span).collect())
     }
 }

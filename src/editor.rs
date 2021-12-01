@@ -1,20 +1,17 @@
 use std::cmp::{max, min};
-
-use anyhow::Context;
 use std::time::Duration;
 
+use anyhow::Context;
 use druid::kurbo::Line;
 use druid::piet::*;
 use druid::*;
 use itertools::Itertools;
-
 use ropey::RopeSlice;
 
 use crate::buffer::{Action, Bounds, Index, IntoWithBuffer, Movement};
-
 use crate::highlight::TreeSitterHighlight;
 use crate::lsp::{lsp_send, lsp_try_recv, CompletionData, LspInput, LspOutput};
-use crate::style_layer::{style_for_range, Span, StyleLayer};
+use crate::style_layer::{style_for_range, DiagStyleLayer, Span, StyleLayer};
 use crate::theme::Style;
 use crate::{curr_buf, lock, AppState, BufferSource, Path, THEME};
 
@@ -31,7 +28,6 @@ lazy_static::lazy_static! {
 pub struct TextEditor {
     last_buffer_id: Option<u32>,
     char_points: Vec<(Point, Index)>,
-    regions: Vec<Region>,
     highlight: Option<TreeSitterHighlight>,
     highlight_spans: Vec<Span>,
     scroll_line: usize,
@@ -106,11 +102,8 @@ impl TextEditor {
                 self.calculate_highlight()?;
                 ctx.request_paint();
             }
-            LspOutput::Diagnostics(url, diags) => {
-                let mut buffers = lock!(mut buffers);
-                let buf = buffers.get_mut_curr()?;
-                // buf.buffer.diagnostics = diags;
-                // ctx.request_paint();
+            LspOutput::Diagnostics => {
+                ctx.request_paint();
             }
         }
         Ok(())
@@ -349,27 +342,35 @@ impl TextEditor {
 
             let mut spans_layers = vec![];
             spans_layers.push(self.highlight_spans.as_slice());
+            let diags_layer = DiagStyleLayer().spans(buffers.curr()?, 0, rope.len_chars())?;
+            spans_layers.push(&diags_layer);
 
             for (line_number_layout, line) in line_numbers_layouts
                 .iter()
                 .zip((0..).skip(self.scroll_line))
             {
                 let bounds = buf.buffer.line_bounds(line);
-                let text = buf.buffer.text_slice(bounds.0..bounds.1)?;
                 let slice = rope.slice(bounds.0..bounds.1);
 
                 let spans = style_for_range(&spans_layers, bounds.0, bounds.1)?;
 
                 let layouts = spans
                     .iter()
-                    .map(|s| text_layout(ctx, env, &text, &s.style))
+                    .flat_map(|s| -> anyhow::Result<_> {
+                        Ok(text_layout(
+                            ctx,
+                            env,
+                            &buf.buffer.text_slice(s.start..s.end)?,
+                            &s.style,
+                        ))
+                    })
                     .collect::<Vec<_>>();
 
                 let max_height = layouts
                     .iter()
                     .map(|l| l.size().height)
                     .max_by(|a, b| a.partial_cmp(b).unwrap())
-                    .unwrap_or(10.0);
+                    .unwrap_or(line_number_layout.size().height);
 
                 ctx.draw_text(
                     line_number_layout,
@@ -382,8 +383,8 @@ impl TextEditor {
                 let mut x = linenr_max_width + LINE_SPACING * 2.0;
                 for (span, layout) in spans.iter().zip(layouts) {
                     for idx in span.start..span.end {
-                        let with_offset = idx - span.start;
-                        let rects = layout.rects_for_range(with_offset..=with_offset);
+                        let byte = slice.char_to_byte(idx - span.start);
+                        let rects = layout.rects_for_range(byte..=byte);
                         for r in rects {
                             let point = Point::new(r.x0 + x, y + (r.y0 + r.y1) / 2.0);
                             self.char_points.push((point, idx))
@@ -483,7 +484,6 @@ impl TextEditor {
         Self {
             last_buffer_id: None,
             char_points: vec![],
-            regions: vec![],
             highlight: None,
             highlight_spans: vec![],
             scroll_line: 0,
@@ -501,36 +501,6 @@ impl TextEditor {
         self.highlight_spans =
             highlight.spans(self.last_buffer_id.context("no buffer")?, min, max)?;
         Ok(())
-    }
-
-    fn build_parts<'a>(
-        ctx: &mut PaintCtx,
-        env: &Env,
-        global_start_char: usize,
-        slice: RopeSlice<'a>,
-        cuts: &Vec<Cut>,
-    ) -> Vec<TextPart<'a>> {
-        let mut parts = Vec::new();
-
-        for cut in cuts {
-            let start_byte = cut.start_byte;
-            let end_byte = cut.end_byte;
-
-            let start_char = slice.byte_to_char(start_byte);
-            let end_char = slice.byte_to_char(end_byte);
-            let line_slice = slice.slice(start_char..end_char);
-
-            let layout = text_layout(ctx, env, line_slice.as_str().unwrap(), &cut.style);
-
-            parts.push(TextPart {
-                layout,
-                slice: line_slice,
-                start_char: global_start_char + start_char,
-                end_char: global_start_char + end_char,
-                style: cut.style.clone(),
-            });
-        }
-        parts
     }
 
     fn scroll(&mut self, scroll: isize) -> anyhow::Result<()> {
