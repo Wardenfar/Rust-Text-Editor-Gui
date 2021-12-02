@@ -1,5 +1,6 @@
+use druid::Color;
 use std::cmp::{max, min};
-use std::collections::Bound;
+use std::collections::{Bound, HashSet};
 use std::io::Read;
 use std::ops::RangeBounds;
 use std::sync::atomic::{AtomicI32, Ordering};
@@ -9,6 +10,7 @@ use lsp_types::{DiagnosticSeverity, Position, Range};
 use ropey::Rope;
 
 use crate::lsp::{CompletionData, LspCompletion, LspInput};
+use crate::theme::Style;
 
 pub struct Diagnostic {
     pub bounds: Bounds,
@@ -17,6 +19,65 @@ pub struct Diagnostic {
 }
 
 pub struct Diagnotics(pub(crate) Vec<Diagnostic>);
+
+pub struct VirtualText {
+    pub handle: Handle,
+    pub text: String,
+    pub style: Style,
+}
+
+pub enum Handle {
+    LineStart(usize),
+    LineEnd(usize),
+    Char(Index),
+}
+
+impl Diagnostic {
+    pub fn color(&self) -> Color {
+        match self.severity {
+            DiagnosticSeverity::ERROR => Color::RED,
+            DiagnosticSeverity::HINT => Color::rgb(255.0, 165.0, 0.0),
+            DiagnosticSeverity::WARNING => Color::rgb(255.0, 165.0, 0.0),
+            DiagnosticSeverity::INFORMATION => Color::rgb(255.0, 165.0, 0.0),
+            _ => Color::RED,
+        }
+    }
+}
+
+impl Buffer {
+    pub fn virtual_texts(&self) -> Vec<VirtualText> {
+        let mut lines: HashSet<usize> = Default::default();
+        let mut virtual_texts = Vec::new();
+        for diag in self
+            .diagnostics
+            .0
+            .iter()
+            .sorted_by(|a, b| a.severity.cmp(&b.severity))
+        {
+            let start = diag.bounds.0;
+            let line = self.row_at(start);
+            if lines.contains(&line) {
+                continue;
+            }
+            lines.insert(line);
+
+            let mut style = Style::default();
+            style.background = Some(Color::rgb(0.2, 0.2, 0.2));
+            style.foreground = Some(diag.color());
+            style.italic = Some(true);
+
+            let text = diag.message.clone().replace("\r", "").replace("\n", "");
+            let text = format!(" {} ", text);
+
+            virtual_texts.push(VirtualText {
+                handle: Handle::LineEnd(line),
+                text,
+                style,
+            })
+        }
+        virtual_texts
+    }
+}
 
 pub struct Buffer {
     id: u32,

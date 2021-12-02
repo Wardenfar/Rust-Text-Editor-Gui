@@ -19,6 +19,7 @@ pub struct Style {
     pub bold: Option<bool>,
     pub text_size: Option<f64>,
     pub text_font: Option<String>,
+    pub wavy_underline: Option<Color>,
 }
 
 #[derive(Clone, Debug)]

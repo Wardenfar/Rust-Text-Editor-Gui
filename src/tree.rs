@@ -1,10 +1,7 @@
-use crate::editor::{text_layout, DEFAULT_BACKGROUND_COLOR, HALF_LINE_SPACING, LINE_SPACING};
+use crate::draw::{drawable_text, Drawable};
+use crate::editor::{DEFAULT_BACKGROUND_COLOR, HALF_LINE_SPACING, LINE_SPACING};
 use crate::{AppState, THEME};
-use druid::piet::TextLayout;
-use druid::{
-    BoxConstraints, Env, Event, EventCtx, KbKey, LayoutCtx, LifeCycle, LifeCycleCtx, PaintCtx,
-    Point, Rect, RenderContext, Size, UpdateCtx, Widget,
-};
+use druid::*;
 
 pub type ShouldRepaint = bool;
 
@@ -168,7 +165,7 @@ impl<T: Tree> Widget<AppState> for TreeViewer<T> {
                 }
             }
 
-            let layout = text_layout(ctx, env, &item.text, &style);
+            let draw_text = drawable_text(ctx, env, &item.text, &style);
 
             if let Some(bg) = bg {
                 ctx.fill(
@@ -176,18 +173,18 @@ impl<T: Tree> Widget<AppState> for TreeViewer<T> {
                         0.0,
                         y,
                         rect.width(),
-                        y + layout.size().height + HALF_LINE_SPACING,
+                        y + draw_text.height() + HALF_LINE_SPACING,
                     ),
                     &bg,
                 );
             }
 
             let x = item.level as f64 * 20.0;
-            ctx.draw_text(&layout, Point::new(x, y));
+            draw_text.draw(ctx, x, y);
             if y > ctx.size().height {
                 break;
             }
-            y += layout.size().height + LINE_SPACING;
+            y += draw_text.height() + LINE_SPACING;
         }
 
         ctx.restore().unwrap();

@@ -4,6 +4,7 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicU32, Ordering};
 
 pub mod buffer;
+mod draw;
 pub mod editor;
 pub mod fs;
 pub mod highlight;

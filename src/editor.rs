@@ -8,7 +8,8 @@ use druid::*;
 use itertools::Itertools;
 use ropey::RopeSlice;
 
-use crate::buffer::{Action, Bounds, Index, IntoWithBuffer, Movement};
+use crate::buffer::{Action, Bounds, Handle, Index, IntoWithBuffer, Movement};
+use crate::draw::{drawable_text, Drawable};
 use crate::highlight::TreeSitterHighlight;
 use crate::lsp::{lsp_send, lsp_try_recv, CompletionData, LspInput, LspOutput};
 use crate::style_layer::{style_for_range, DiagStyleLayer, Span, StyleLayer};
@@ -22,7 +23,7 @@ pub const DEFAULT_BACKGROUND_COLOR: Color = Color::rgb8(0x2f, 0x2f, 0x2f);
 pub const DEFAULT_FOREGROUND_COLOR: Color = Color::rgb8(0xcc, 0xcc, 0xcc);
 pub const DEFAULT_TEXT_SIZE: f64 = 18.0;
 lazy_static::lazy_static! {
-    pub static ref DEFAULT_TEXT_FONT: String = String::from("Roboto Mono");
+    pub static ref DEFAULT_TEXT_FONT: String = String::from("Fira Code");
 }
 
 pub struct TextEditor {
@@ -293,6 +294,8 @@ impl TextEditor {
         let buffers = lock!(buffers);
         let buf = buffers.get(buffers.curr()?)?;
 
+        let virtual_texts = buf.buffer.virtual_texts();
+
         ctx.save().unwrap();
         ctx.clip(rect);
 
@@ -300,7 +303,7 @@ impl TextEditor {
 
         let cursor_row = buf.buffer.row();
 
-        let mut line_numbers_layouts = Vec::new();
+        let mut line_numbers_texts = Vec::new();
         self.last_line_painted = 0;
         for n in self.scroll_line..rope.len_lines() {
             let style = if n == cursor_row {
@@ -308,14 +311,14 @@ impl TextEditor {
             } else {
                 THEME.scope("ui.linenr")
             };
-            let layout = text_layout(ctx, env, &format!("{}", n + 1), &style);
-            line_numbers_layouts.push(layout);
+            let draw_text = drawable_text(ctx, env, &format!("{}", n + 1), &style);
+            line_numbers_texts.push(draw_text);
         }
 
-        if !line_numbers_layouts.is_empty() {
-            let linenr_max_width = line_numbers_layouts
+        if !line_numbers_texts.is_empty() {
+            let linenr_max_width = line_numbers_texts
                 .iter()
-                .map(|l| l.size().width.floor() as i64)
+                .map(|dtext| dtext.width().floor() as i64)
                 .max()
                 .unwrap() as f64
                 + LINE_SPACING * 4.0;
@@ -345,19 +348,17 @@ impl TextEditor {
             let diags_layer = DiagStyleLayer().spans(buffers.curr()?, 0, rope.len_chars())?;
             spans_layers.push(&diags_layer);
 
-            for (line_number_layout, line) in line_numbers_layouts
-                .iter()
-                .zip((0..).skip(self.scroll_line))
+            for (line_number_text, line) in
+                line_numbers_texts.iter().zip((0..).skip(self.scroll_line))
             {
                 let bounds = buf.buffer.line_bounds(line);
-                let slice = rope.slice(bounds.0..bounds.1);
 
-                let spans = style_for_range(&spans_layers, bounds.0, bounds.1)?;
+                let mut spans = style_for_range(&spans_layers, bounds.0, bounds.1)?;
 
-                let layouts = spans
+                let mut draw_texts = spans
                     .iter()
                     .flat_map(|s| -> anyhow::Result<_> {
-                        Ok(text_layout(
+                        Ok(drawable_text(
                             ctx,
                             env,
                             &buf.buffer.text_slice(s.start..s.end)?,
@@ -366,29 +367,40 @@ impl TextEditor {
                     })
                     .collect::<Vec<_>>();
 
-                let max_height = layouts
-                    .iter()
-                    .map(|l| l.size().height)
-                    .max_by(|a, b| a.partial_cmp(b).unwrap())
-                    .unwrap_or(line_number_layout.size().height);
+                for v in &virtual_texts {
+                    if let Handle::LineEnd(line_idx) = v.handle {
+                        if line_idx == line {
+                            let draw_text = drawable_text(ctx, env, &v.text, &v.style);
+                            draw_texts.push(draw_text);
+                            spans.push(Span {
+                                start: bounds.1,
+                                end: bounds.1,
+                                style: v.style.clone(),
+                            })
+                        }
+                    }
+                }
 
-                ctx.draw_text(
-                    line_number_layout,
-                    Point::new(
-                        linenr_max_width - line_number_layout.size().width - LINE_SPACING * 2.0,
-                        y,
-                    ),
+                let max_height = draw_texts
+                    .iter()
+                    .map(|l| l.height())
+                    .max_by(|a, b| a.partial_cmp(b).unwrap())
+                    .unwrap_or(line_number_text.height());
+
+                line_number_text.draw(
+                    ctx,
+                    linenr_max_width - line_number_text.width() - LINE_SPACING * 2.0,
+                    y,
                 );
 
                 let mut x = linenr_max_width + LINE_SPACING * 2.0;
-                for (span, layout) in spans.iter().zip(layouts) {
+                for (span, draw_text) in spans.iter().zip(draw_texts) {
                     let slice = rope.slice(span.start..span.end);
                     for idx in span.start..span.end {
                         if idx - span.start + 1 < slice.len_chars() {
                             let byte_start = slice.char_to_byte(idx - span.start);
                             let byte_end = slice.char_to_byte(idx - span.start + 1);
-                            println!("{} {}", byte_start, byte_end);
-                            let rects = layout.rects_for_range(byte_start..byte_end);
+                            let rects = draw_text.text_layout.rects_for_range(byte_start..byte_end);
                             for r in rects {
                                 let point = Point::new(r.x0 + x, y + (r.y0 + r.y1) / 2.0);
                                 self.char_points.push((point, idx))
@@ -402,7 +414,7 @@ impl TextEditor {
                         min(span.end, buf.buffer.cursor().max()).saturating_sub(span.start);
 
                     if sel_min < sel_max {
-                        let rects = layout.rects_for_range(sel_min..sel_max);
+                        let rects = draw_text.text_layout.rects_for_range(sel_min..sel_max);
                         ctx.with_save(|ctx| {
                             ctx.transform(Affine::translate(Vec2::new(x, y)));
                             for mut r in rects {
@@ -418,12 +430,12 @@ impl TextEditor {
                         });
                     }
 
-                    ctx.draw_text(&layout, Point::new(x, y));
+                    draw_text.draw(ctx, x, y);
 
                     if span.start <= cursor && cursor <= span.end {
                         let char_idx = cursor - span.start;
                         let byte_idx = slice.char_to_byte(char_idx);
-                        let hit = layout.hit_test_text_position(byte_idx);
+                        let hit = draw_text.text_layout.hit_test_text_position(byte_idx);
                         let curr_x = x + hit.point.x;
                         let line = Line::new(
                             Point::new(curr_x, y),
@@ -433,7 +445,7 @@ impl TextEditor {
                         ctx.stroke(line, &Color::RED, 1.0);
                     }
 
-                    x += layout.trailing_whitespace_width();
+                    x += draw_text.text_layout.trailing_whitespace_width();
                 }
 
                 y += max_height + LINE_SPACING;
@@ -445,10 +457,11 @@ impl TextEditor {
             }
 
             if self.last_line_painted == 0 {
-                let l = text_layout(ctx, env, "[]", &Style::default());
-                self.last_line_painted = ((rect.height() - y) / l.size().height).round() as usize
+                let draw_text = drawable_text(ctx, env, "[]", &Style::default());
+                self.last_line_painted = ((rect.height() - y) / draw_text.height()).round()
+                    as usize
                     + self.scroll_line
-                    + line_numbers_layouts.len();
+                    + line_numbers_texts.len();
             }
 
             let cursor_point = cursor_point.unwrap_or((0.0, 0.0));
@@ -462,13 +475,13 @@ impl TextEditor {
                 .map(|c| &c.label)
                 .join("\n");
 
-            let layout = text_layout(ctx, env, &text, &THEME.scope("ui.text"));
+            let draw_text = drawable_text(ctx, env, &text, &THEME.scope("ui.text"));
 
             let rect = Rect::new(
                 cursor_point.0,
                 cursor_point.1,
-                cursor_point.0 + layout.size().width,
-                cursor_point.1 + layout.size().height,
+                cursor_point.0 + draw_text.width(),
+                cursor_point.1 + draw_text.height(),
             );
             ctx.fill(
                 rect,
@@ -477,7 +490,7 @@ impl TextEditor {
                     .background
                     .unwrap_or(DEFAULT_BACKGROUND_COLOR),
             );
-            ctx.draw_text(&layout, Point::new(cursor_point.0, cursor_point.1));
+            draw_text.draw(ctx, cursor_point.0, cursor_point.1);
         }
         ctx.restore().unwrap();
         Ok(())
@@ -575,44 +588,4 @@ pub struct Cut {
     pub start_byte: usize,
     pub end_byte: usize,
     pub style: Style,
-}
-
-pub fn text_layout(ctx: &mut PaintCtx, _env: &Env, text: &str, style: &Style) -> D2DTextLayout {
-    let mut builder = ctx
-        .text()
-        .new_text_layout(text.to_string())
-        .text_color(
-            style
-                .foreground
-                .as_ref()
-                .unwrap_or(&DEFAULT_FOREGROUND_COLOR)
-                .clone(),
-        )
-        .font(
-            FontFamily::new_unchecked(
-                style
-                    .text_font
-                    .as_ref()
-                    .unwrap_or(&DEFAULT_TEXT_FONT)
-                    .as_str(),
-            ),
-            style.text_size.unwrap_or(DEFAULT_TEXT_SIZE),
-        );
-
-    if let Some(bold) = style.bold {
-        if bold {
-            builder = builder.range_attribute(.., TextAttribute::Weight(FontWeight::BOLD));
-        }
-    }
-    if let Some(italic) = style.italic {
-        if italic {
-            builder = builder.range_attribute(.., TextAttribute::Style(FontStyle::Italic));
-        }
-    }
-    if let Some(underline) = style.underline {
-        if underline {
-            builder = builder.range_attribute(.., TextAttribute::Underline(true));
-        }
-    }
-    builder.build().unwrap()
 }

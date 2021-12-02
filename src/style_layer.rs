@@ -1,7 +1,6 @@
 use crate::buffer::Index;
 use crate::lock;
 use crate::theme::Style;
-use druid::Color;
 
 #[derive(Default, Clone, Debug)]
 pub struct Span {
@@ -53,6 +52,9 @@ pub fn style_for_range(layers: &[&[Span]], min: Index, max: Index) -> anyhow::Re
                 if let Some(bold) = &span.style.bold {
                     current_span.style.bold = Some(bold.clone());
                 }
+                if let Some(wavy_underline) = &span.style.wavy_underline {
+                    current_span.style.wavy_underline = Some(wavy_underline.clone());
+                }
             }
         }
         final_spans.push(current_span.clone());
@@ -76,9 +78,11 @@ impl StyleLayer for DiagStyleLayer {
             let mut span = Span::default();
             span.start = diag.bounds.0;
             span.end = diag.bounds.1;
-            span.style.foreground = Some(Color::RED);
-            span.style.underline = Some(true);
-            span.style.italic = Some(true);
+
+            let color = diag.color();
+
+            span.style.background = Some(color.clone().with_alpha(0.10));
+            span.style.wavy_underline = Some(color);
             spans.push(span);
         }
         Ok(spans)
