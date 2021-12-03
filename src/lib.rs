@@ -191,7 +191,7 @@ impl Buffers {
     pub fn get_by_uri(&self, uri: Url) -> Option<&BufferData> {
         for (_, b) in &self.buffers {
             if let BufferSource::File { path } = &b.source {
-                if &path.uri() == &uri {
+                if &path.uri().as_str().to_lowercase() == &uri.as_str().to_lowercase() {
                     return Some(b);
                 }
             }
@@ -202,7 +202,7 @@ impl Buffers {
     pub fn get_by_uri_mut(&mut self, uri: Url) -> Option<&mut BufferData> {
         for (_, b) in &mut self.buffers {
             if let BufferSource::File { path } = &b.source {
-                if &path.uri() == &uri {
+                if path.uri().as_str().to_lowercase() == uri.as_str().to_lowercase() {
                     return Some(b);
                 }
             }
