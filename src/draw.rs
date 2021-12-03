@@ -61,7 +61,7 @@ pub fn drawable_text(ctx: &mut PaintCtx, _env: &Env, text: &str, style: &Style) 
                     .unwrap_or(&DEFAULT_TEXT_FONT)
                     .as_str(),
             ),
-            style.text_size.unwrap_or(DEFAULT_TEXT_SIZE) * 2.0,
+            style.text_size.unwrap_or(DEFAULT_TEXT_SIZE),
         );
 
     if let Some(bold) = style.bold {
