@@ -1,6 +1,6 @@
 use crate::buffer::Index;
 use crate::theme::Style;
-use crate::{lock, BufferData};
+use crate::BufferData;
 
 #[derive(Default, Clone, Debug)]
 pub struct Span {

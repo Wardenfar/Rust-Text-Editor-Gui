@@ -1,7 +1,7 @@
 use crate::buffer::Index;
 use crate::style_layer::{Span, StyleLayer};
 use crate::theme::Style;
-use crate::{lock, BufferData, LspLang, THEME};
+use crate::{BufferData, LspLang, THEME};
 use std::collections::HashMap;
 use tree_sitter::{Language, Parser, Query, QueryCursor};
 

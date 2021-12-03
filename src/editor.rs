@@ -136,7 +136,7 @@ impl TextEditor {
 
         match event {
             Event::Timer(_timer) => {
-                self.recv_lsp_event(ctx);
+                self.recv_lsp_event(ctx).err().map(|_ignore| {});
                 ctx.request_timer(Duration::from_millis(250));
             }
             Event::KeyDown(key) => {

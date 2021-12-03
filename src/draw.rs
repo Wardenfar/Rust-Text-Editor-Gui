@@ -22,7 +22,9 @@ impl Drawable for DrawableText {
         ctx.with_save(|ctx| {
             ctx.transform(Affine::translate(Vec2::new(x, y)));
             if let Some(color) = &self.background_color {
-                ctx.fill(&self.text_layout.size().to_rect(), color);
+                let mut rect = self.text_layout.size().to_rect();
+                rect.x1 += self.text_layout.trailing_whitespace_width() - (rect.x1 - rect.x0);
+                ctx.fill(&rect.to_rounded_rect(3.0), color);
             }
             ctx.draw_text(&self.text_layout, Point::new(0.0, 0.0));
             if let Some(wave_text_layout) = &self.wave_text_layout {
@@ -59,7 +61,7 @@ pub fn drawable_text(ctx: &mut PaintCtx, _env: &Env, text: &str, style: &Style) 
                     .unwrap_or(&DEFAULT_TEXT_FONT)
                     .as_str(),
             ),
-            style.text_size.unwrap_or(DEFAULT_TEXT_SIZE),
+            style.text_size.unwrap_or(DEFAULT_TEXT_SIZE) * 2.0,
         );
 
     if let Some(bold) = style.bold {

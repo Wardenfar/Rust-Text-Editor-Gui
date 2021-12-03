@@ -19,6 +19,7 @@ use crate::lsp::{lsp_send_with_lang, LspInput, LspLang};
 use anyhow::Context;
 use fs::LocalFs;
 use lsp::LspSystem;
+use lsp_types::Url;
 use parking_lot::RwLock;
 use std::sync::Mutex;
 use theme::Theme;
@@ -141,6 +142,7 @@ impl Buffers {
         let source = BufferSource::File { path: path.clone() };
 
         let data = BufferData {
+            id,
             source,
             lsp_lang: path.lsp_lang(),
             read_only: false,
@@ -186,6 +188,27 @@ impl Buffers {
         let id = self.curr()?;
         self.buffers.get_mut(&id).context("no buffer")
     }
+    pub fn get_by_uri(&self, uri: Url) -> Option<&BufferData> {
+        for (_, b) in &self.buffers {
+            if let BufferSource::File { path } = &b.source {
+                if &path.uri() == &uri {
+                    return Some(b);
+                }
+            }
+        }
+        None
+    }
+
+    pub fn get_by_uri_mut(&mut self, uri: Url) -> Option<&mut BufferData> {
+        for (_, b) in &mut self.buffers {
+            if let BufferSource::File { path } = &b.source {
+                if &path.uri() == &uri {
+                    return Some(b);
+                }
+            }
+        }
+        None
+    }
 }
 
 pub enum BufferSource {
@@ -203,6 +226,7 @@ impl BufferSource {
 }
 
 pub struct BufferData {
+    pub id: u32,
     pub source: BufferSource,
     pub lsp_lang: LspLang,
     pub read_only: bool,

@@ -10,8 +10,9 @@ use lsp_types::{DiagnosticSeverity, Position, Range};
 use ropey::Rope;
 
 use crate::lsp::{CompletionData, LspCompletion, LspInput};
-use crate::lsp_ext::InlayHint;
+use crate::lsp_ext::{InlayHint, InlayKind};
 use crate::theme::Style;
+use crate::THEME;
 
 pub struct Diagnostic {
     pub bounds: Bounds,
@@ -78,15 +79,19 @@ impl Buffer {
         }
 
         for (idx, hint) in &self.inlay_hints {
-            let mut style = Style::default();
-            style.background = Some(Color::rgb(0.2, 0.2, 0.2));
-            style.foreground = Some(Color::rgb(0.8, 0.8, 0.8));
-            style.italic = Some(true);
+            let style = THEME.scope("hint");
 
-            let text = format!(" : {} ", hint.label);
+            let (handle, text) = match hint.kind {
+                InlayKind::TypeHint => (Handle::Char(*idx), format!(" : {} ", hint.label)),
+                InlayKind::ParameterHint => (Handle::Char(*idx), format!(" {} : ", hint.label)),
+                InlayKind::ChainingHint => (
+                    Handle::LineEnd(self.row_at(*idx)),
+                    format!(" => {} ", hint.label),
+                ),
+            };
 
             virtual_texts.push(VirtualText {
-                handle: Handle::Char(*idx),
+                handle,
                 text,
                 style,
             })

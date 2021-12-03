@@ -13,9 +13,9 @@ use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::process::ChildStdin;
 use tokio::sync::mpsc;
 
-use crate::buffer::{Bounds, Index, IntoWithBuffer};
-use crate::lsp_ext::InlayHint;
-use crate::{lock, lsp_ext, BufferSource, Path, GLOBAL};
+use crate::buffer::{Bounds, IntoWithBuffer};
+use crate::lsp_ext::{InlayHint, InlayKind};
+use crate::{lock, lsp_ext, Path, GLOBAL};
 
 #[derive(Debug, Clone, Hash, Eq, PartialEq)]
 pub enum LspLang {
@@ -436,6 +436,14 @@ impl LspClient {
                 notify_did_close(&mut stdin, uri).await.unwrap();
             }
             LspInput::SavedFile { uri, content } => {
+                let id = {
+                    let buffers = lock!(buffers);
+                    buffers
+                        .get_by_uri(uri.clone())
+                        .context("buffer not found")?
+                        .id
+                };
+                notify_did_change(&mut stdin, id).await.unwrap();
                 notify_did_save(&mut stdin, uri.clone(), content)
                     .await
                     .unwrap();
@@ -456,18 +464,17 @@ impl LspClient {
 
 fn process_inlay_hints(uri: Url, hints: Vec<InlayHint>) {
     let mut buffers = lock!(mut buffers);
-    let buf = buffers.buffers.values_mut().find(|b| {
-        if let BufferSource::File { path } = &b.source {
-            uri.as_str().to_lowercase() == path.uri().as_str().to_lowercase()
-        } else {
-            false
-        }
-    });
+    let buf = buffers.get_by_uri_mut(uri);
 
     if let Some(buf) = buf {
         buf.buffer.inlay_hints.clear();
         for hint in hints {
-            let idx: Index = (&hint.range.end).into_with_buf(&buf.buffer);
+            let pos = match &hint.kind {
+                InlayKind::TypeHint => hint.range.end,
+                InlayKind::ParameterHint => hint.range.start,
+                InlayKind::ChainingHint => hint.range.end,
+            };
+            let idx = (&pos).into_with_buf(&buf.buffer);
             buf.buffer.inlay_hints.push((idx, hint));
         }
     }
@@ -723,17 +730,12 @@ fn process_diagnostics(default_uri: Url, diagnostics: Vec<Diagnostic>) {
                 uri = info.location.uri.clone();
             }
         }
-        let buf = buffers.buffers.iter_mut().find(|(_, b)| {
-            if let BufferSource::File { path } = &b.source {
-                uri.as_str().to_lowercase() == path.uri().as_str().to_lowercase()
-            } else {
-                false
-            }
-        });
-        if let Some((id, buf)) = buf {
-            if !cleared.contains(id) {
+
+        let buf = buffers.get_by_uri_mut(uri);
+        if let Some(buf) = buf {
+            if !cleared.contains(&buf.id) {
                 buf.buffer.diagnostics.0.clear();
-                cleared.push(*id);
+                cleared.push(buf.id);
             }
             let bounds: Bounds = (&diagnostic.range).into_with_buf(&buf.buffer);
             buf.buffer.diagnostics.0.push(crate::buffer::Diagnostic {
