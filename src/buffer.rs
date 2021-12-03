@@ -10,6 +10,7 @@ use lsp_types::{DiagnosticSeverity, Position, Range};
 use ropey::Rope;
 
 use crate::lsp::{CompletionData, LspCompletion, LspInput};
+use crate::lsp_ext::InlayHint;
 use crate::theme::Style;
 
 pub struct Diagnostic {
@@ -75,6 +76,21 @@ impl Buffer {
                 style,
             })
         }
+
+        for (idx, hint) in &self.inlay_hints {
+            let mut style = Style::default();
+            style.background = Some(Color::rgb(0.2, 0.2, 0.2));
+            style.foreground = Some(Color::rgb(0.8, 0.8, 0.8));
+            style.italic = Some(true);
+
+            let text = format!(" : {} ", hint.label);
+
+            virtual_texts.push(VirtualText {
+                handle: Handle::Char(*idx),
+                text,
+                style,
+            })
+        }
         virtual_texts
     }
 }
@@ -86,6 +102,7 @@ pub struct Buffer {
     pub version: AtomicI32,
     pub completions: Vec<LspCompletion>,
     pub diagnostics: Diagnotics,
+    pub inlay_hints: Vec<(Index, InlayHint)>,
 }
 
 pub enum Movement {
@@ -149,10 +166,28 @@ impl FromWithBuffer<&Range> for Bounds {
     }
 }
 
+impl FromWithBuffer<&Bounds> for Range {
+    fn from_with_buf(bounds: &Bounds, buffer: &Buffer) -> Self {
+        Range {
+            start: Position::from_with_buf(&bounds.0, buffer),
+            end: Position::from_with_buf(&bounds.1, buffer),
+        }
+    }
+}
+
 impl FromWithBuffer<&Position> for Index {
     fn from_with_buf(pos: &Position, buffer: &Buffer) -> Self {
         let line = buffer.line_bounds(pos.line as usize);
         line.0 + pos.character as usize
+    }
+}
+
+impl FromWithBuffer<&Index> for Position {
+    fn from_with_buf(idx: &Index, buffer: &Buffer) -> Self {
+        Position {
+            line: buffer.row_at(*idx) as u32,
+            character: buffer.col_at(*idx) as u32,
+        }
     }
 }
 
@@ -217,6 +252,7 @@ impl Buffer {
             version: Default::default(),
             completions: vec![],
             diagnostics: Diagnotics(vec![]),
+            inlay_hints: vec![],
         }
     }
 
@@ -382,6 +418,9 @@ impl Buffer {
             diag.bounds.0 = (f)(diag.bounds.0);
             diag.bounds.1 = (f)(diag.bounds.1);
         }
+        self.inlay_hints
+            .iter_mut()
+            .for_each(|(idx, _)| *idx = (f)(*idx));
     }
 
     pub fn insert<I: IntoWithBuffer<Index>>(&mut self, start: I, chars: &str) -> LspInput {

@@ -2,22 +2,20 @@ use std::collections::HashMap;
 use std::io::Write;
 use std::process;
 use std::process::Command;
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use anyhow::Context;
 use jsonrpc_core::id::Id;
 use jsonrpc_core::Output;
+use lsp_types::request::Request;
 use lsp_types::*;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::process::ChildStdin;
 use tokio::sync::mpsc;
 
-use crate::buffer::{Bounds, IntoWithBuffer};
-use crate::{lock, BufferSource, Path, GLOBAL, LSP};
-
-const ID_INIT: u64 = 0;
-const ID_COMPLETION: u64 = 1;
-const ID_COMPLETION_RESOLVE: u64 = 2;
+use crate::buffer::{Bounds, Index, IntoWithBuffer};
+use crate::lsp_ext::InlayHint;
+use crate::{lock, lsp_ext, BufferSource, Path, GLOBAL};
 
 #[derive(Debug, Clone, Hash, Eq, PartialEq)]
 pub enum LspLang {
@@ -56,7 +54,7 @@ pub fn lsp_send(buffer_id: u32, input: LspInput) -> anyhow::Result<()> {
     let buffers = lock!(buffers);
     let buffer = buffers.get(buffer_id)?;
 
-    let mut lsp = LSP.lock().unwrap();
+    let mut lsp = lock!(mut lsp);
     let client = lsp
         .get(root_path.uri(), &buffer.lsp_lang)
         .context("no lsp client")?;
@@ -68,7 +66,7 @@ pub fn lsp_send_with_lang(lsp_lang: LspLang, input: LspInput) -> anyhow::Result<
     let global = GLOBAL.lock().unwrap();
     let root_path = &global.root_path;
 
-    let mut lsp = LSP.lock().unwrap();
+    let mut lsp = lock!(mut lsp);
     let client = lsp
         .get(root_path.uri(), &lsp_lang)
         .context("no lsp client")?;
@@ -83,7 +81,7 @@ pub fn lsp_try_recv(buffer_id: u32) -> anyhow::Result<LspOutput> {
     let buffers = lock!(buffers);
     let buffer = buffers.get(buffer_id)?;
 
-    let mut lsp = LSP.lock().unwrap();
+    let mut lsp = lock!(mut lsp);
     let client = lsp
         .get(root_path.uri(), &buffer.lsp_lang)
         .context("no lsp client found")?;
@@ -94,9 +92,26 @@ pub fn lsp_try_recv(buffer_id: u32) -> anyhow::Result<LspOutput> {
 #[derive(Default)]
 pub struct LspSystem {
     clients: HashMap<(Url, LspLang), LspClient>,
+    counter: AtomicU64,
+    requests: HashMap<u64, SentRequest>,
+}
+
+pub struct SentRequest {
+    pub method: String,
+    pub uri: Url,
 }
 
 impl LspSystem {
+    pub fn new_request(&mut self, method: String, uri: Url) -> u64 {
+        let id = self.counter.fetch_add(1, Ordering::SeqCst);
+        self.requests.insert(id, SentRequest { method, uri });
+        id
+    }
+
+    pub fn get_request(&mut self, id: u64) -> Option<SentRequest> {
+        self.requests.remove(&id)
+    }
+
     pub fn get(&mut self, root_path: Url, lang: &LspLang) -> Option<&mut LspClient> {
         let key = (root_path.clone(), lang.clone());
         if let Some(cmd) = lang.cmd() {
@@ -145,12 +160,16 @@ pub enum LspInput {
         uri: Url,
         content: String,
     },
+    InlayHints {
+        uri: Url,
+    },
 }
 
 #[derive(Debug)]
 pub enum LspOutput {
     Completion(Vec<LspCompletion>),
     CompletionResolve(LspCompletion),
+    InlayHints,
     Diagnostics,
 }
 
@@ -279,7 +298,7 @@ impl LspClient {
 
         let (c_tx, mut c_rx) = mpsc::unbounded_channel::<LspInput>();
         tokio::spawn(async move {
-            send_request_async::<_, lsp_types::request::Initialize>(&mut stdin, ID_INIT, init)
+            send_request_async_with_id::<_, lsp_types::request::Initialize>(&mut stdin, 0, init)
                 .await
                 .unwrap();
             // Wait initialize
@@ -327,30 +346,55 @@ impl LspClient {
                     serde_json::from_str(&msg);
                 if let Ok(Output::Success(suc)) = output {
                     println!("{}", suc.result);
-                    if suc.id == Id::Num(ID_INIT) {
-                        init_tx.send(())?;
-                    } else if suc.id == Id::Num(ID_COMPLETION) {
-                        let completion =
-                            serde_json::from_value::<lsp_types::CompletionResponse>(suc.result)?;
-                        let completions = match completion {
-                            CompletionResponse::Array(arr) => convert_completions(arr),
-                            CompletionResponse::List(list) => convert_completions(list.items),
-                        };
-                        tx.send(LspOutput::Completion(completions))?;
-                    } else if suc.id == Id::Num(ID_COMPLETION_RESOLVE) {
-                        let item: CompletionItem = serde_json::from_value(suc.result)?;
-                        tx.send(LspOutput::CompletionResolve(
-                            convert_completion(item).unwrap(),
-                        ))?;
+                    if let Id::Num(id) = suc.id {
+                        if id == 0 {
+                            init_tx.send(())?;
+                        } else {
+                            let request = {
+                                let mut lsp = lock!(mut lsp);
+                                lsp.get_request(id).unwrap()
+                            };
+                            match request.method.as_str() {
+                                lsp_types::request::Completion::METHOD => {
+                                    let completion =
+                                        serde_json::from_value::<lsp_types::CompletionResponse>(
+                                            suc.result,
+                                        )?;
+                                    let completions = match completion {
+                                        CompletionResponse::Array(arr) => convert_completions(arr),
+                                        CompletionResponse::List(list) => {
+                                            convert_completions(list.items)
+                                        }
+                                    };
+                                    tx.send(LspOutput::Completion(completions))?;
+                                }
+                                lsp_types::request::ResolveCompletionItem::METHOD => {
+                                    let item: CompletionItem = serde_json::from_value(suc.result)?;
+                                    tx.send(LspOutput::CompletionResolve(
+                                        convert_completion(item).unwrap(),
+                                    ))?;
+                                }
+                                lsp_ext::InlayHints::METHOD => {
+                                    let item: Vec<InlayHint> = serde_json::from_value(suc.result)?;
+                                    process_inlay_hints(request.uri, item);
+                                    tx.send(LspOutput::InlayHints)?;
+                                }
+                                _ => {}
+                            }
+                        }
                     }
                 } else if let Ok(notification) = notification {
-                    if notification.get("method").unwrap() == "textDocument/publishDiagnostics" {
-                        let params: PublishDiagnosticsParams =
-                            serde_json::from_value(notification.get("params").unwrap().clone())
-                                .unwrap();
-                        let diagnostics = params.diagnostics;
-                        process_diagnostics(params.uri.clone(), diagnostics);
-                        tx.send(LspOutput::Diagnostics)?;
+                    if let Some(method) = notification.get("method") {
+                        if method == "textDocument/publishDiagnostics" {
+                            let params: PublishDiagnosticsParams =
+                                serde_json::from_value(notification.get("params").unwrap().clone())
+                                    .unwrap();
+                            let diagnostics = params.diagnostics;
+                            process_diagnostics(params.uri.clone(), diagnostics);
+                            tx.send(LspOutput::Diagnostics)?;
+                        } else {
+                            println!("{} {:?}", method, notification);
+                        }
                     } else {
                         println!("{:?}", notification);
                     }
@@ -374,53 +418,8 @@ impl LspClient {
                 col,
                 buffer_id,
             } => {
-                let (path, version, text) = {
-                    let buffers = lock!(buffers);
-                    let buffer = buffers.get(buffer_id)?;
-                    (
-                        buffer.source.path().context("path")?,
-                        buffer.buffer.version.fetch_add(1, Ordering::SeqCst),
-                        buffer.buffer.text(),
-                    )
-                };
-                let url = path.uri();
-                let edits = lsp_types::DidChangeTextDocumentParams {
-                    text_document: VersionedTextDocumentIdentifier {
-                        uri: url.clone(),
-                        version,
-                    },
-                    content_changes: vec![TextDocumentContentChangeEvent {
-                        range: None,
-                        range_length: None,
-                        text,
-                    }],
-                };
-                send_notify_async::<_, lsp_types::notification::DidChangeTextDocument>(
-                    &mut stdin, edits,
-                )
-                .await?;
-                let completion = lsp_types::CompletionParams {
-                    text_document_position: lsp_types::TextDocumentPositionParams {
-                        text_document: lsp_types::TextDocumentIdentifier { uri: url },
-                        position: lsp_types::Position {
-                            line: row,
-                            character: col,
-                        },
-                    },
-                    work_done_progress_params: Default::default(),
-                    partial_result_params: Default::default(),
-                    context: Some(CompletionContext {
-                        trigger_kind: CompletionTriggerKind::INVOKED,
-                        trigger_character: None,
-                    }),
-                };
-                send_request_async::<_, lsp_types::request::Completion>(
-                    &mut stdin,
-                    ID_COMPLETION,
-                    completion,
-                )
-                .await
-                .unwrap();
+                let url = notify_did_change(&mut stdin, buffer_id).await.unwrap();
+                request_completion(&mut stdin, row, col, url).await;
             }
             LspInput::RequestCompletionResolve { item, .. } => {
                 request_resolve_completion_item(&mut stdin, item)
@@ -428,13 +427,22 @@ impl LspClient {
                     .unwrap();
             }
             LspInput::OpenFile { uri: url, content } => {
-                notify_did_open(&mut stdin, url, content).await.unwrap();
+                notify_did_open(&mut stdin, url.clone(), content)
+                    .await
+                    .unwrap();
+                request_inlay_hints(&mut stdin, url).await.unwrap();
             }
             LspInput::CloseFile { uri } => {
                 notify_did_close(&mut stdin, uri).await.unwrap();
             }
             LspInput::SavedFile { uri, content } => {
-                notify_did_save(&mut stdin, uri, content).await.unwrap();
+                notify_did_save(&mut stdin, uri.clone(), content)
+                    .await
+                    .unwrap();
+                request_inlay_hints(&mut stdin, uri).await.unwrap();
+            }
+            LspInput::InlayHints { uri } => {
+                request_inlay_hints(&mut stdin, uri).await.unwrap();
             }
             LspInput::Edit {
                 version: _v,
@@ -446,11 +454,51 @@ impl LspClient {
     }
 }
 
+fn process_inlay_hints(uri: Url, hints: Vec<InlayHint>) {
+    let mut buffers = lock!(mut buffers);
+    let buf = buffers.buffers.values_mut().find(|b| {
+        if let BufferSource::File { path } = &b.source {
+            uri.as_str().to_lowercase() == path.uri().as_str().to_lowercase()
+        } else {
+            false
+        }
+    });
+
+    if let Some(buf) = buf {
+        buf.buffer.inlay_hints.clear();
+        for hint in hints {
+            let idx: Index = (&hint.range.end).into_with_buf(&buf.buffer);
+            buf.buffer.inlay_hints.push((idx, hint));
+        }
+    }
+}
+
 fn convert_completions(mut input: Vec<CompletionItem>) -> Vec<LspCompletion> {
     input
         .drain(..)
         .filter_map(|c| convert_completion(c))
         .collect()
+}
+
+async fn request_completion(mut stdin: &mut &mut ChildStdin, row: u32, col: u32, uri: Url) {
+    let completion = lsp_types::CompletionParams {
+        text_document_position: lsp_types::TextDocumentPositionParams {
+            text_document: lsp_types::TextDocumentIdentifier { uri: uri.clone() },
+            position: lsp_types::Position {
+                line: row,
+                character: col,
+            },
+        },
+        work_done_progress_params: Default::default(),
+        partial_result_params: Default::default(),
+        context: Some(CompletionContext {
+            trigger_kind: CompletionTriggerKind::INVOKED,
+            trigger_character: None,
+        }),
+    };
+    send_request_async::<_, lsp_types::request::Completion>(&mut stdin, uri, completion)
+        .await
+        .unwrap();
 }
 
 fn convert_completion(c: CompletionItem) -> Option<LspCompletion> {
@@ -472,11 +520,11 @@ fn convert_completion(c: CompletionItem) -> Option<LspCompletion> {
                 unimplemented!("insert and replace")
             }
         }
-        if let Some(additionals) = c.additional_text_edits {
-            for a in additionals {
+        if let Some(additional_edits) = c.additional_text_edits {
+            for edit in additional_edits {
                 edits.push(TextEdit {
-                    range: a.range,
-                    new_text: a.new_text,
+                    range: edit.range,
+                    new_text: edit.new_text,
                 })
             }
         }
@@ -490,7 +538,37 @@ fn convert_completion(c: CompletionItem) -> Option<LspCompletion> {
     }
 }
 
-async fn send_request_async<T: AsyncWrite + std::marker::Unpin, R: lsp_types::request::Request>(
+async fn notify_did_change(mut stdin: &mut &mut ChildStdin, buffer_id: u32) -> anyhow::Result<Url> {
+    let (path, version, text) = {
+        let buffers = lock!(buffers);
+        let buffer = buffers.get(buffer_id)?;
+        (
+            buffer.source.path().context("path")?,
+            buffer.buffer.version.fetch_add(1, Ordering::SeqCst),
+            buffer.buffer.text(),
+        )
+    };
+    let url = path.uri();
+    let edits = lsp_types::DidChangeTextDocumentParams {
+        text_document: VersionedTextDocumentIdentifier {
+            uri: url.clone(),
+            version,
+        },
+        content_changes: vec![TextDocumentContentChangeEvent {
+            range: None,
+            range_length: None,
+            text,
+        }],
+    };
+    send_notify_async::<_, lsp_types::notification::DidChangeTextDocument>(&mut stdin, edits)
+        .await?;
+    Ok(url)
+}
+
+async fn send_request_async_with_id<
+    T: AsyncWrite + std::marker::Unpin,
+    R: lsp_types::request::Request,
+>(
     t: &mut T,
     id: u64,
     params: R::Params,
@@ -519,6 +597,22 @@ where
     } else {
         anyhow::bail!("Invalid params");
     }
+}
+
+async fn send_request_async<T: AsyncWrite + std::marker::Unpin, R: lsp_types::request::Request>(
+    t: &mut T,
+    uri: Url,
+    params: R::Params,
+) -> anyhow::Result<()>
+where
+    R::Params: serde::Serialize,
+{
+    let id = {
+        let mut lsp = lock!(mut lsp);
+        let id = lsp.new_request(R::METHOD.into(), uri);
+        id
+    };
+    send_request_async_with_id::<_, R>(t, id, params).await
 }
 
 async fn send_notify_async<
@@ -601,10 +695,21 @@ async fn request_resolve_completion_item<T: AsyncWrite + std::marker::Unpin>(
 ) -> anyhow::Result<()> {
     send_request_async::<_, lsp_types::request::ResolveCompletionItem>(
         stdin,
-        ID_COMPLETION_RESOLVE,
+        Url::parse("none://none")?,
         item,
     )
     .await
+}
+
+// lsp inlay hint request
+async fn request_inlay_hints<T: AsyncWrite + std::marker::Unpin>(
+    stdin: &mut T,
+    uri: Url,
+) -> anyhow::Result<()> {
+    let params = lsp_ext::InlayHintsParams {
+        text_document: TextDocumentIdentifier { uri: uri.clone() },
+    };
+    send_request_async::<_, lsp_ext::InlayHints>(stdin, uri, params).await
 }
 
 fn process_diagnostics(default_uri: Url, diagnostics: Vec<Diagnostic>) {

@@ -1,4 +1,5 @@
 use std::cmp::{max, min};
+use std::collections::HashMap;
 use std::time::Duration;
 
 use anyhow::Context;
@@ -9,7 +10,7 @@ use itertools::Itertools;
 use ropey::RopeSlice;
 
 use crate::buffer::{Action, Bounds, Handle, Index, IntoWithBuffer, Movement};
-use crate::draw::{drawable_text, Drawable};
+use crate::draw::{drawable_text, Drawable, DrawableText};
 use crate::highlight::TreeSitterHighlight;
 use crate::lsp::{lsp_send, lsp_try_recv, CompletionData, LspInput, LspOutput};
 use crate::style_layer::{style_for_range, DiagStyleLayer, Span, StyleLayer};
@@ -106,6 +107,9 @@ impl TextEditor {
             LspOutput::Diagnostics => {
                 ctx.request_paint();
             }
+            LspOutput::InlayHints => {
+                ctx.request_paint();
+            }
         }
         Ok(())
     }
@@ -132,7 +136,8 @@ impl TextEditor {
 
         match event {
             Event::Timer(_timer) => {
-                ctx.request_timer(Duration::from_millis(100));
+                self.recv_lsp_event(ctx);
+                ctx.request_timer(Duration::from_millis(250));
             }
             Event::KeyDown(key) => {
                 let is_shift = key.mods.shift();
@@ -345,7 +350,7 @@ impl TextEditor {
 
             let mut spans_layers = vec![];
             spans_layers.push(self.highlight_spans.as_slice());
-            let diags_layer = DiagStyleLayer().spans(buffers.curr()?, 0, rope.len_chars())?;
+            let diags_layer = DiagStyleLayer().spans(buf, 0, rope.len_chars())?;
             spans_layers.push(&diags_layer);
 
             for (line_number_text, line) in
@@ -353,7 +358,22 @@ impl TextEditor {
             {
                 let bounds = buf.buffer.line_bounds(line);
 
-                let mut spans = style_for_range(&spans_layers, bounds.0, bounds.1)?;
+                let mut hints: HashMap<Index, DrawableText> = Default::default();
+                for v in &virtual_texts {
+                    if let Handle::Char(idx) = v.handle {
+                        if idx >= bounds.0 && idx < bounds.1 {
+                            let draw_text = drawable_text(ctx, env, &v.text, &v.style);
+                            hints.insert(idx, draw_text);
+                        }
+                    }
+                }
+
+                let mut spans = style_for_range(
+                    &spans_layers,
+                    bounds.0,
+                    bounds.1,
+                    hints.keys().copied().collect(),
+                )?;
 
                 let mut draw_texts = spans
                     .iter()
@@ -393,8 +413,27 @@ impl TextEditor {
                     y,
                 );
 
+                let mut spans_with_texts = spans.into_iter().zip(draw_texts).collect_vec();
+
+                for (idx, text) in hints {
+                    let pos = spans_with_texts.iter().position(|(s, _)| s.start == idx);
+                    let data = (
+                        Span {
+                            start: idx,
+                            end: idx,
+                            style: Style::default(),
+                        },
+                        text,
+                    );
+                    if let Some(pos) = pos {
+                        spans_with_texts.insert(pos, data);
+                    } else {
+                        spans_with_texts.push(data);
+                    }
+                }
+
                 let mut x = linenr_max_width + LINE_SPACING * 2.0;
-                for (span, draw_text) in spans.iter().zip(draw_texts) {
+                for (span, draw_text) in spans_with_texts {
                     let slice = rope.slice(span.start..span.end);
                     for idx in span.start..span.end {
                         if idx - span.start + 1 < slice.len_chars() {
@@ -516,8 +555,7 @@ impl TextEditor {
         let rope = buf.buffer.rope();
         let min = 0;
         let max = rope.len_chars();
-        self.highlight_spans =
-            highlight.spans(self.last_buffer_id.context("no buffer")?, min, max)?;
+        self.highlight_spans = highlight.spans(buf, min, max)?;
         Ok(())
     }
 
@@ -542,8 +580,6 @@ impl Widget<AppState> for TextEditor {
         if let Err(e) = self.process(ctx, event, data) {
             println!("{}", e);
         }
-
-        while let Ok(_) = self.recv_lsp_event(ctx) {}
     }
 
     fn lifecycle(

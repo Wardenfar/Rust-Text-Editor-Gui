@@ -9,6 +9,7 @@ pub mod editor;
 pub mod fs;
 pub mod highlight;
 pub mod lsp;
+mod lsp_ext;
 mod style_layer;
 pub mod theme;
 pub mod tree;
@@ -28,7 +29,7 @@ pub const EDITOR_FONT: Key<FontDescriptor> = Key::new("editor.font");
 lazy_static::lazy_static! {
     pub static ref THEME: Theme = toml::from_str(include_str!("../runtime/themes/gruvbox.toml")).unwrap();
     pub static ref FS: LocalFs = LocalFs::default();
-    pub static ref LSP: Mutex<LspSystem> = Mutex::new(LspSystem::default());
+    pub static ref LSP: RwLock<LspSystem> = RwLock::new(LspSystem::default());
     pub static ref BUFFERS: RwLock<Buffers> = RwLock::new(Buffers::default());
     pub static ref GLOBAL: Mutex<Global> = Mutex::new(Global {
         root_path: FS.path("./data/example")
@@ -44,6 +45,14 @@ macro_rules! lock {
     (mut buffers) => {{
         // println!("{} {}", file!(), line!());
         crate::BUFFERS.write()
+    }};
+    (lsp) => {{
+        // println!("lsp {} {}", file!(), line!());
+        crate::LSP.read()
+    }};
+    (mut lsp) => {{
+        // println!("lsp {} {}", file!(), line!());
+        crate::LSP.write()
     }};
 }
 

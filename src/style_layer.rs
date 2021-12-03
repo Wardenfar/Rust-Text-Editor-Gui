@@ -1,6 +1,6 @@
 use crate::buffer::Index;
-use crate::lock;
 use crate::theme::Style;
+use crate::{lock, BufferData};
 
 #[derive(Default, Clone, Debug)]
 pub struct Span {
@@ -10,10 +10,15 @@ pub struct Span {
 }
 
 pub trait StyleLayer {
-    fn spans(&mut self, buffer_id: u32, min: Index, max: Index) -> anyhow::Result<Vec<Span>>;
+    fn spans(&mut self, buffer: &BufferData, min: Index, max: Index) -> anyhow::Result<Vec<Span>>;
 }
 
-pub fn style_for_range(layers: &[&[Span]], min: Index, max: Index) -> anyhow::Result<Vec<Span>> {
+pub fn style_for_range(
+    layers: &[&[Span]],
+    min: Index,
+    max: Index,
+    initial_cuts: Vec<Index>,
+) -> anyhow::Result<Vec<Span>> {
     let mut spans = Vec::new();
     for layer in layers {
         spans.extend(*layer);
@@ -23,6 +28,7 @@ pub fn style_for_range(layers: &[&[Span]], min: Index, max: Index) -> anyhow::Re
     cuts.extend(spans.iter().map(|span| span.end));
     cuts.push(min);
     cuts.push(max);
+    cuts.extend(initial_cuts);
     let mut cuts: Vec<Index> = cuts.into_iter().filter(|&x| min <= x && x <= max).collect();
     cuts.sort();
     cuts.dedup();
@@ -70,9 +76,7 @@ pub fn style_for_range(layers: &[&[Span]], min: Index, max: Index) -> anyhow::Re
 pub struct DiagStyleLayer();
 
 impl StyleLayer for DiagStyleLayer {
-    fn spans(&mut self, buffer_id: u32, _min: Index, _max: Index) -> anyhow::Result<Vec<Span>> {
-        let buffers = lock!(buffers);
-        let buf = buffers.get(buffer_id)?;
+    fn spans(&mut self, buf: &BufferData, _min: Index, _max: Index) -> anyhow::Result<Vec<Span>> {
         let mut spans = Vec::new();
         for diag in buf.buffer.diagnostics.0.iter() {
             let mut span = Span::default();

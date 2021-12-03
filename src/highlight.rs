@@ -1,7 +1,7 @@
 use crate::buffer::Index;
 use crate::style_layer::{Span, StyleLayer};
 use crate::theme::Style;
-use crate::{lock, LspLang, THEME};
+use crate::{lock, BufferData, LspLang, THEME};
 use std::collections::HashMap;
 use tree_sitter::{Language, Parser, Query, QueryCursor};
 
@@ -78,9 +78,12 @@ impl TreeSitterHighlight {
 }
 
 impl StyleLayer for TreeSitterHighlight {
-    fn spans(&mut self, buffer_id: u32, _min: Index, _max: Index) -> anyhow::Result<Vec<Span>> {
-        let buffers = lock!(buffers);
-        let buffer = buffers.get(buffer_id)?;
+    fn spans(
+        &mut self,
+        buffer: &BufferData,
+        _min: Index,
+        _max: Index,
+    ) -> anyhow::Result<Vec<Span>> {
         let text = buffer.buffer.text();
         let rope = buffer.buffer.rope();
         let tree = self.parser.parse(&text, None).unwrap();
