@@ -616,7 +616,7 @@ impl Widget<AppState> for TextEditor {
 }
 
 pub struct TextPart<'a> {
-    pub layout: D2DTextLayout,
+    pub layout: crate::draw::ITextLayout,
     pub slice: RopeSlice<'a>,
     pub start_char: usize,
     pub end_char: usize,

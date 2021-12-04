@@ -124,8 +124,6 @@ impl LspSystem {
 
 #[derive(Debug)]
 pub struct LspClient {
-    lang: LspLang,
-    process: tokio::process::Child,
     pub input_channel: mpsc::UnboundedSender<LspInput>,
     pub output_channel: mpsc::UnboundedReceiver<LspOutput>,
 }
@@ -404,8 +402,6 @@ impl LspClient {
         });
 
         Ok(Self {
-            lang: lang.clone(),
-            process: lsp,
             output_channel: rx,
             input_channel: c_tx,
         })

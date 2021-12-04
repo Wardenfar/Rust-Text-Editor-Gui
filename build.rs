@@ -16,17 +16,16 @@ fn main() {
         let scanner_cpp = dir.join("scanner.cc");
 
         let mut builder = cc::Build::new();
-        let builder = builder.include(&dir);
-        builder.file(parser);
-
+        builder.include(&dir);
         if scanner.exists() {
             builder.file(scanner);
         }
-        if scanner_cpp.exists() {
-            builder.file(scanner_cpp);
-            builder.cpp(true);
-        }
+        builder.file(parser).compile(name);
 
-        builder.compile(name);
+        if scanner_cpp.exists() {
+            let mut builder = cc::Build::new();
+            builder.include(&dir).cpp(true).file(scanner_cpp);
+            builder.compile(&format!("{}_cpp", name));
+        }
     }
 }

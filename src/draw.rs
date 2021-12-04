@@ -1,10 +1,16 @@
 use crate::editor::{DEFAULT_FOREGROUND_COLOR, DEFAULT_TEXT_FONT, DEFAULT_TEXT_SIZE};
 use crate::theme::Style;
 use crate::{lock, THEME};
-use druid::piet::{D2DTextLayout, Text, TextAttribute, TextLayout, TextLayoutBuilder};
+use druid::piet::{Text, TextAttribute, TextLayout, TextLayoutBuilder};
 use druid::{
     Affine, Color, Env, FontFamily, FontStyle, FontWeight, PaintCtx, Point, RenderContext, Vec2,
 };
+
+#[cfg(windows)]
+pub use druid::piet::D2DTextLayout as ITextLayout;
+
+#[cfg(unix)]
+pub use druid::piet::CairoTextLayout as ITextLayout;
 
 pub trait Drawable {
     fn draw(&self, ctx: &mut PaintCtx, x: f64, y: f64);
@@ -14,8 +20,8 @@ pub trait Drawable {
 
 pub struct DrawableText {
     pub background_color: Option<Color>,
-    pub text_layout: D2DTextLayout,
-    pub wave_text_layout: Option<D2DTextLayout>,
+    pub text_layout: ITextLayout,
+    pub wave_text_layout: Option<ITextLayout>,
 }
 
 impl Drawable for DrawableText {
