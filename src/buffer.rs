@@ -68,7 +68,7 @@ impl Buffer {
             style.foreground = Some(diag.color());
             style.italic = Some(true);
 
-            let text = diag.message.clone().replace("\r", "").replace("\n", "");
+            let text = diag.message.clone().replace("\r", "").replace("\n", " : ");
             let text = format!(" {} ", text);
 
             virtual_texts.push(VirtualText {

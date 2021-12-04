@@ -9,15 +9,16 @@ use jsonrpc_core::id::Id;
 use jsonrpc_core::Output;
 use lsp_types::request::Request;
 use lsp_types::*;
+use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::process::ChildStdin;
 use tokio::sync::mpsc;
 
 use crate::buffer::{Bounds, IntoWithBuffer};
 use crate::lsp_ext::{InlayHint, InlayKind};
-use crate::{lock, lsp_ext, Path, GLOBAL};
+use crate::{lock, lsp_ext, Path};
 
-#[derive(Debug, Clone, Hash, Eq, PartialEq)]
+#[derive(Debug, Clone, Hash, Eq, PartialEq, Deserialize, Serialize)]
 pub enum LspLang {
     Rust,
     Json,
@@ -26,29 +27,24 @@ pub enum LspLang {
 }
 
 impl LspLang {
-    pub fn from_ext<S: Into<String>>(ext: S) -> Option<LspLang> {
-        match ext.into().as_str() {
-            "rs" => Some(LspLang::Rust),
-            "py" => Some(LspLang::Python),
-            "json" => Some(LspLang::Json),
-            _ => None,
-        }
-    }
-
     pub fn cmd(&self) -> Option<Command> {
-        match self {
-            LspLang::Rust => {
-                let mut cmd = std::process::Command::new("rustup");
-                cmd.args(["run", "nightly", "rust-analyzer"]);
-                Some(cmd)
+        let config = lock!(conf);
+
+        for server in &config.lsp.servers {
+            if &server.lang == self {
+                let parts = &server.command;
+                let mut cmd = std::process::Command::new(&parts[0]);
+                cmd.args(parts.iter().skip(1));
+                return Some(cmd);
             }
-            _ => None,
         }
+
+        None
     }
 }
 
 pub fn lsp_send(buffer_id: u32, input: LspInput) -> anyhow::Result<()> {
-    let global = GLOBAL.lock().unwrap();
+    let global = lock!(global);
     let root_path = &global.root_path;
 
     let buffers = lock!(buffers);
@@ -63,7 +59,7 @@ pub fn lsp_send(buffer_id: u32, input: LspInput) -> anyhow::Result<()> {
 }
 
 pub fn lsp_send_with_lang(lsp_lang: LspLang, input: LspInput) -> anyhow::Result<()> {
-    let global = GLOBAL.lock().unwrap();
+    let global = lock!(global);
     let root_path = &global.root_path;
 
     let mut lsp = lock!(mut lsp);
@@ -75,7 +71,7 @@ pub fn lsp_send_with_lang(lsp_lang: LspLang, input: LspInput) -> anyhow::Result<
 }
 
 pub fn lsp_try_recv(buffer_id: u32) -> anyhow::Result<LspOutput> {
-    let global = GLOBAL.lock().unwrap();
+    let global = lock!(global);
     let root_path = &global.root_path;
 
     let buffers = lock!(buffers);
@@ -118,7 +114,7 @@ impl LspSystem {
             let client = self
                 .clients
                 .entry(key)
-                .or_insert_with(|| LspClient::new(root_path.clone(), cmd).unwrap());
+                .or_insert_with(|| LspClient::new(lang.clone(), root_path.clone(), cmd).unwrap());
             Some(client)
         } else {
             None
@@ -128,6 +124,7 @@ impl LspSystem {
 
 #[derive(Debug)]
 pub struct LspClient {
+    lang: LspLang,
     process: tokio::process::Child,
     pub input_channel: mpsc::UnboundedSender<LspInput>,
     pub output_channel: mpsc::UnboundedReceiver<LspOutput>,
@@ -193,7 +190,7 @@ pub struct TextEdit {
 }
 
 impl LspClient {
-    fn new(root_path: Url, cmd: Command) -> anyhow::Result<LspClient> {
+    fn new(lang: LspLang, root_path: Url, cmd: Command) -> anyhow::Result<LspClient> {
         let mut lsp = tokio::process::Command::from(cmd)
             .stdin(process::Stdio::piped())
             .stdout(process::Stdio::piped())
@@ -297,6 +294,8 @@ impl LspClient {
         let (tx, rx) = mpsc::unbounded_channel();
 
         let (c_tx, mut c_rx) = mpsc::unbounded_channel::<LspInput>();
+
+        let lang_clone = lang.clone();
         tokio::spawn(async move {
             send_request_async_with_id::<_, lsp_types::request::Initialize>(&mut stdin, 0, init)
                 .await
@@ -312,7 +311,7 @@ impl LspClient {
             .unwrap();
 
             while let Some(lsp_input) = c_rx.recv().await {
-                let r = Self::process_input(&mut stdin, lsp_input).await;
+                let r = Self::process_input(&lang_clone, &mut stdin, lsp_input).await;
                 if let Err(e) = r {
                     println!("{}", e);
                 }
@@ -405,13 +404,18 @@ impl LspClient {
         });
 
         Ok(Self {
+            lang: lang.clone(),
             process: lsp,
             output_channel: rx,
             input_channel: c_tx,
         })
     }
 
-    async fn process_input(mut stdin: &mut ChildStdin, lsp_input: LspInput) -> anyhow::Result<()> {
+    async fn process_input(
+        lang: &LspLang,
+        mut stdin: &mut ChildStdin,
+        lsp_input: LspInput,
+    ) -> anyhow::Result<()> {
         match lsp_input {
             LspInput::RequestCompletion {
                 row,
@@ -447,10 +451,14 @@ impl LspClient {
                 notify_did_save(&mut stdin, uri.clone(), content)
                     .await
                     .unwrap();
-                request_inlay_hints(&mut stdin, uri).await.unwrap();
+                if let LspLang::Rust = lang {
+                    request_inlay_hints(&mut stdin, uri).await.unwrap();
+                }
             }
             LspInput::InlayHints { uri } => {
-                request_inlay_hints(&mut stdin, uri).await.unwrap();
+                if let LspLang::Rust = lang {
+                    request_inlay_hints(&mut stdin, uri).await.unwrap();
+                }
             }
             LspInput::Edit {
                 version: _v,

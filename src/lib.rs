@@ -4,24 +4,25 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicU32, Ordering};
 
 pub mod buffer;
-mod draw;
+pub mod config;
+pub mod draw;
 pub mod editor;
 pub mod fs;
 pub mod highlight;
 pub mod lsp;
-mod lsp_ext;
-mod style_layer;
+pub mod lsp_ext;
+pub mod style_layer;
 pub mod theme;
 pub mod tree;
 
 use crate::buffer::Buffer;
+use crate::config::Config;
 use crate::lsp::{lsp_send_with_lang, LspInput, LspLang};
 use anyhow::Context;
 use fs::LocalFs;
 use lsp::LspSystem;
 use lsp_types::Url;
 use parking_lot::RwLock;
-use std::sync::Mutex;
 use theme::Theme;
 
 pub const FONT: Key<FontDescriptor> = Key::new("ui.font");
@@ -32,8 +33,9 @@ lazy_static::lazy_static! {
     pub static ref FS: LocalFs = LocalFs::default();
     pub static ref LSP: RwLock<LspSystem> = RwLock::new(LspSystem::default());
     pub static ref BUFFERS: RwLock<Buffers> = RwLock::new(Buffers::default());
-    pub static ref GLOBAL: Mutex<Global> = Mutex::new(Global {
-        root_path: FS.path("./data/example")
+    pub static ref CONFIG: RwLock<Config> = RwLock::new(Config::default());
+    pub static ref GLOBAL: RwLock<Global> = RwLock::new(Global {
+        root_path: FS.path(".")
     });
 }
 
@@ -41,19 +43,35 @@ lazy_static::lazy_static! {
 macro_rules! lock {
     (buffers) => {{
         // println!("{} {}", file!(), line!());
-        crate::BUFFERS.read()
+        $crate::BUFFERS.read()
     }};
     (mut buffers) => {{
         // println!("{} {}", file!(), line!());
-        crate::BUFFERS.write()
+        $crate::BUFFERS.write()
     }};
     (lsp) => {{
         // println!("lsp {} {}", file!(), line!());
-        crate::LSP.read()
+        $crate::LSP.read()
     }};
     (mut lsp) => {{
         // println!("lsp {} {}", file!(), line!());
-        crate::LSP.write()
+        $crate::LSP.write()
+    }};
+    (conf) => {{
+        // println!("config {} {}", file!(), line!());
+        $crate::CONFIG.read()
+    }};
+    (mut conf) => {{
+        // println!("config {} {}", file!(), line!());
+        $crate::CONFIG.write()
+    }};
+    (global) => {{
+        // println!("global {} {}", file!(), line!());
+        $crate::GLOBAL.read()
+    }};
+    (mut global) => {{
+        // println!("global {} {}", file!(), line!());
+        $crate::GLOBAL.write()
     }};
 }
 
@@ -156,13 +174,17 @@ impl Buffers {
 
         self.current = Some(id);
 
-        lsp_send_with_lang(
+        let failed = lsp_send_with_lang(
             path.lsp_lang(),
             LspInput::OpenFile {
                 uri: path.uri(),
                 content: text,
             },
-        )?;
+        )
+        .is_err();
+        if failed {
+            println!("lsp start failed")
+        }
 
         Ok(id)
     }
@@ -232,4 +254,12 @@ pub struct BufferData {
     pub read_only: bool,
     pub modified: bool,
     pub buffer: Buffer,
+}
+
+pub trait Ignore {
+    fn ignore(self);
+}
+
+impl<T> Ignore for anyhow::Result<T> {
+    fn ignore(self) {}
 }

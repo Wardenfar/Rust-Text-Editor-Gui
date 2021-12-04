@@ -1,9 +1,9 @@
 use std::fs::{File as StdFile, File};
 use std::path::PathBuf;
 
+use crate::lock;
 use crate::lsp::LspLang;
 use crate::tree::{ItemStyle, ShouldRepaint, Tree};
-use crate::{lock, GLOBAL};
 use druid::{Data, KbKey};
 use lsp_types::Url;
 
@@ -38,7 +38,7 @@ impl FileSystem for LocalFs {
         S: Into<String>,
     {
         LocalPath {
-            inner: PathBuf::from(path.into()),
+            inner: PathBuf::from(path.into()).canonicalize().unwrap(),
         }
     }
 
@@ -62,11 +62,25 @@ impl Path for LocalPath {
     type Writer = File;
 
     fn lsp_lang(&self) -> LspLang {
+        let name = self.name();
+        let config = lock!(conf);
+        let lang = config
+            .extensions
+            .iter()
+            .find(|e| e.file_names.contains(&name))
+            .map(|e| e.lang.clone());
+
+        if let Some(lang) = lang {
+            return lang;
+        }
+
         if let Some(ext) = self.extension() {
-            match ext.as_str() {
-                "rs" => LspLang::Rust,
-                _ => LspLang::PlainText,
-            }
+            config
+                .extensions
+                .iter()
+                .find(|e| e.file_extension.contains(&ext))
+                .map(|e| e.lang.clone())
+                .unwrap_or(LspLang::PlainText)
         } else {
             LspLang::PlainText
         }
@@ -118,7 +132,7 @@ impl Tree for LocalFs {
     type Key = LocalPath;
 
     fn root(&self) -> Self::Key {
-        let global = GLOBAL.lock().unwrap();
+        let global = lock!(global);
         global.root_path.clone()
     }
 

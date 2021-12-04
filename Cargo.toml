@@ -24,6 +24,7 @@ serde_json = "1.0.71"
 anyhow = "1.0.45"
 jsonrpc-core = "18.0.0"
 parking_lot = {version = "0.11.2", features = ["deadlock_detection"]}
+clap = "2.34.0"
 
 [dependencies.serde]
 version = "1.0.130"

@@ -37,7 +37,7 @@
 "tree.dir" = { fg = "yellow0", font = "Segoe UI", size = 16.0 }
 "tree.selected" = { fg = "yellow1", bg = "bg1", font = "Segoe UI", size = 16.0 }
 
-"hint" = { fg = "fg1", bg = "black", font = "Segoe UI", size = 14.0 }
+"hint" = { fg = "light_gray", bg = "black", font = "Segoe UI", size = 14.0 }
 
 "ui.background" = { bg = "bg0" }
 "ui.linenr" = { fg = "bg4" }
@@ -55,8 +55,6 @@
 "ui.menu" = { fg = "fg1", bg = "bg2" }
 "ui.menu.selected" = { fg = "bg2", bg = "blue1", modifiers = ["bold"] }
 
-"diagnostic" = { modifiers = ["underlined"] }
-
 [palette]
 bg0 = "#282828" # main background
 bg1 = "#3c3836"
@@ -71,6 +69,8 @@ fg3 = "#bdae93"
 fg4 = "#a89984" # gray0
 
 black = "#222222"
+
+light_gray = "#959390"
 
 gray0 = "#a89984"
 gray1 = "#928374"

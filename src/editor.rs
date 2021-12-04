@@ -15,7 +15,7 @@ use crate::highlight::TreeSitterHighlight;
 use crate::lsp::{lsp_send, lsp_try_recv, CompletionData, LspInput, LspOutput};
 use crate::style_layer::{style_for_range, DiagStyleLayer, Span, StyleLayer};
 use crate::theme::Style;
-use crate::{curr_buf, lock, AppState, BufferSource, Path, THEME};
+use crate::{curr_buf, lock, AppState, BufferSource, Ignore, Path, THEME};
 
 pub const LINE_SPACING: f64 = 4.0;
 pub const SCROLL_GAP: usize = 4;
@@ -44,7 +44,7 @@ impl TextEditor {
             (buf.buffer.do_action(action), buffers.curr()?)
         };
         if let Some(action) = action {
-            lsp_send(id, action)?;
+            lsp_send(id, action).ignore();
             Ok(true)
         } else {
             Ok(false)
@@ -101,7 +101,7 @@ impl TextEditor {
                             });
                     }
                 };
-                self.calculate_highlight()?;
+                self.calculate_highlight().ignore();
                 ctx.request_paint();
             }
             LspOutput::Diagnostics => {
@@ -125,12 +125,12 @@ impl TextEditor {
         if let Some(old) = old {
             if id != old {
                 self.highlight = TreeSitterHighlight::new(curr_buf!(lang));
-                self.calculate_highlight()?;
+                self.calculate_highlight().ignore();
                 ctx.request_paint();
             }
         } else {
             self.highlight = TreeSitterHighlight::new(curr_buf!(lang));
-            self.calculate_highlight()?;
+            self.calculate_highlight().ignore();
             ctx.request_paint();
         }
 
@@ -153,7 +153,8 @@ impl TextEditor {
                                 row: row as u32,
                                 col: col as u32,
                             },
-                        )?;
+                        )
+                        .ignore();
                         false
                     }
                     Code::F1 => {
@@ -170,7 +171,8 @@ impl TextEditor {
                                     buffer_id: id,
                                     item: c.original_item,
                                 },
-                            )?;
+                            )
+                            .ignore();
                             true
                         } else {
                             false
@@ -225,7 +227,8 @@ impl TextEditor {
                                         uri,
                                         content: buf.buffer.text(),
                                     },
-                                )?;
+                                )
+                                .ignore();
                             }
                         }
 
@@ -246,7 +249,7 @@ impl TextEditor {
                     }
                 };
                 if dirty {
-                    self.calculate_highlight()?;
+                    self.calculate_highlight().ignore();
                 }
                 self.fix_scroll()?;
                 ctx.request_paint();

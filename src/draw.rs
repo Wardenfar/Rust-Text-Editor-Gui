@@ -1,5 +1,6 @@
 use crate::editor::{DEFAULT_FOREGROUND_COLOR, DEFAULT_TEXT_FONT, DEFAULT_TEXT_SIZE};
 use crate::theme::Style;
+use crate::{lock, THEME};
 use druid::piet::{D2DTextLayout, Text, TextAttribute, TextLayout, TextLayoutBuilder};
 use druid::{
     Affine, Color, Env, FontFamily, FontStyle, FontWeight, PaintCtx, Point, RenderContext, Vec2,
@@ -43,14 +44,20 @@ impl Drawable for DrawableText {
 }
 
 pub fn drawable_text(ctx: &mut PaintCtx, _env: &Env, text: &str, style: &Style) -> DrawableText {
+    let scale = {
+        let config = lock!(conf);
+        config.render.text_scale
+    };
+
     let mut builder = ctx
         .text()
         .new_text_layout(text.to_string())
         .text_color(
             style
                 .foreground
-                .as_ref()
-                .unwrap_or(&DEFAULT_FOREGROUND_COLOR)
+                .clone()
+                .or_else(|| THEME.scope("ui.text").foreground)
+                .unwrap_or(DEFAULT_FOREGROUND_COLOR)
                 .clone(),
         )
         .font(
@@ -61,7 +68,7 @@ pub fn drawable_text(ctx: &mut PaintCtx, _env: &Env, text: &str, style: &Style) 
                     .unwrap_or(&DEFAULT_TEXT_FONT)
                     .as_str(),
             ),
-            style.text_size.unwrap_or(DEFAULT_TEXT_SIZE),
+            style.text_size.unwrap_or(DEFAULT_TEXT_SIZE) * scale,
         );
 
     if let Some(bold) = style.bold {
